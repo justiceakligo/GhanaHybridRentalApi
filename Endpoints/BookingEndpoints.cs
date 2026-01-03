@@ -1490,8 +1490,144 @@ public static class BookingEndpoints
         booking.PostTripRecordedAt = DateTime.UtcNow;
         booking.PostTripRecordedBy = userId;
 
+        // Calculate prorated charges for early/late returns
+        var actualPickup = booking.ActualPickupDateTime ?? booking.PickupDateTime;
+        var actualReturn = booking.PostTripRecordedAt.Value;
+        var originalPickup = booking.PickupDateTime;
+        var originalReturn = booking.ReturnDateTime;
+
+        // Calculate rental periods in days (minimum 1 day, rounded up)
+        var bookedDays = Math.Max(1, (int)Math.Ceiling((originalReturn - originalPickup).TotalDays));
+        var actualDays = Math.Max(1, (int)Math.Ceiling((actualReturn - actualPickup).TotalDays));
+
+        // Calculate per-day rates
+        var dailyRentalRate = booking.RentalAmount / bookedDays;
+        var dailyDriverRate = booking.WithDriver && booking.DriverAmount.HasValue 
+            ? booking.DriverAmount.Value / bookedDays 
+            : 0;
+        var dailyProtectionRate = booking.ProtectionAmount.HasValue 
+            ? booking.ProtectionAmount.Value / bookedDays 
+            : 0;
+
+        // Calculate prorated amounts based on actual days
+        var proratedRentalAmount = dailyRentalRate * actualDays;
+        var proratedDriverAmount = dailyDriverRate * actualDays;
+        var proratedProtectionAmount = dailyProtectionRate * actualDays;
+
+        // Platform fee is typically % of rental, so prorate it too
+        var proratedPlatformFee = booking.PlatformFee.HasValue 
+            ? (booking.PlatformFee.Value / bookedDays) * actualDays 
+            : 0;
+
+        // Insurance is typically fixed, don't prorate
+        var proratedInsuranceAmount = booking.InsuranceAmount ?? 0;
+
+        // Calculate new total (excluding deposit and promo - those don't change)
+        var proratedTotal = proratedRentalAmount + proratedDriverAmount + proratedProtectionAmount + 
+                           proratedInsuranceAmount + proratedPlatformFee;
+
+        // Calculate refund/charge amount
+        var originalChargeableAmount = booking.TotalAmount; // This already excludes deposit
+        var adjustmentAmount = originalChargeableAmount - proratedTotal;
+
+        string? adjustmentType = null;
+        PaymentTransaction? adjustmentTransaction = null;
+
+        // Early return - issue refund
+        if (adjustmentAmount > 0.01m) // Early return, refund unused days
+        {
+            adjustmentType = "early_return_refund";
+            
+            // Update booking amounts to reflect actual usage
+            booking.RentalAmount = proratedRentalAmount;
+            if (booking.WithDriver && booking.DriverAmount.HasValue)
+                booking.DriverAmount = proratedDriverAmount;
+            if (booking.ProtectionAmount.HasValue)
+                booking.ProtectionAmount = proratedProtectionAmount;
+            if (booking.PlatformFee.HasValue)
+                booking.PlatformFee = proratedPlatformFee;
+            booking.TotalAmount = proratedTotal;
+
+            // Create refund transaction
+            adjustmentTransaction = new PaymentTransaction
+            {
+                BookingId = booking.Id,
+                UserId = booking.RenterId,
+                Type = "refund",
+                Status = "pending",
+                Amount = adjustmentAmount,
+                Currency = booking.Currency,
+                Method = booking.PaymentMethod,
+                Reference = $"REFUND-EARLY-{booking.BookingReference}-{DateTime.UtcNow:yyyyMMddHHmmss}",
+                MetadataJson = JsonSerializer.Serialize(new
+                {
+                    reason = "Early return - prorated refund",
+                    bookedDays,
+                    actualDays,
+                    originalAmount = originalChargeableAmount,
+                    proratedAmount = proratedTotal,
+                    refundAmount = adjustmentAmount,
+                    dailyRentalRate,
+                    dailyDriverRate,
+                    dailyProtectionRate
+                }),
+                CreatedAt = DateTime.UtcNow
+            };
+
+            db.PaymentTransactions.Add(adjustmentTransaction);
+            booking.PaymentStatus = "partial_refund";
+        }
+        // Late return - create additional charge
+        else if (adjustmentAmount < -0.01m) // Late return, charge extra days
+        {
+            adjustmentType = "late_return_charge";
+            var extraCharge = Math.Abs(adjustmentAmount);
+
+            // Update booking amounts to reflect extended usage
+            booking.RentalAmount = proratedRentalAmount;
+            if (booking.WithDriver && booking.DriverAmount.HasValue)
+                booking.DriverAmount = proratedDriverAmount;
+            if (booking.ProtectionAmount.HasValue)
+                booking.ProtectionAmount = proratedProtectionAmount;
+            if (booking.PlatformFee.HasValue)
+                booking.PlatformFee = proratedPlatformFee;
+            booking.TotalAmount = proratedTotal;
+
+            // Create charge transaction
+            adjustmentTransaction = new PaymentTransaction
+            {
+                BookingId = booking.Id,
+                UserId = booking.RenterId,
+                Type = "payment",
+                Status = "pending",
+                Amount = extraCharge,
+                Currency = booking.Currency,
+                Method = booking.PaymentMethod,
+                Reference = $"CHARGE-LATE-{booking.BookingReference}-{DateTime.UtcNow:yyyyMMddHHmmss}",
+                MetadataJson = JsonSerializer.Serialize(new
+                {
+                    reason = "Late return - additional charges",
+                    bookedDays,
+                    actualDays,
+                    originalAmount = originalChargeableAmount,
+                    proratedAmount = proratedTotal,
+                    extraCharge,
+                    dailyRentalRate,
+                    dailyDriverRate,
+                    dailyProtectionRate
+                }),
+                CreatedAt = DateTime.UtcNow
+            };
+
+            db.PaymentTransactions.Add(adjustmentTransaction);
+        }
+
+        // Update ReturnDateTime to actual return time
+        booking.ReturnDateTime = actualReturn;
+
         // Update booking status to completed
         booking.Status = "completed";
+        booking.UpdatedAt = DateTime.UtcNow;
         
         // Send booking completed notifications
         try
@@ -1559,6 +1695,37 @@ public static class BookingEndpoints
                 minutes = tripDuration.Minutes,
                 totalHours = tripDuration.TotalHours
             },
+            rentalPeriod = new
+            {
+                bookedDays,
+                actualDays,
+                earlyReturnDays = bookedDays > actualDays ? bookedDays - actualDays : 0,
+                lateReturnDays = actualDays > bookedDays ? actualDays - bookedDays : 0
+            },
+            charges = new
+            {
+                originalRentalAmount = dailyRentalRate * bookedDays,
+                proratedRentalAmount,
+                originalDriverAmount = dailyDriverRate * bookedDays,
+                proratedDriverAmount,
+                originalProtectionAmount = dailyProtectionRate * bookedDays,
+                proratedProtectionAmount,
+                originalTotal = originalChargeableAmount,
+                proratedTotal,
+                adjustmentAmount,
+                adjustmentType
+            },
+            adjustment = adjustmentTransaction != null ? new
+            {
+                transactionId = adjustmentTransaction.Id,
+                type = adjustmentTransaction.Type,
+                amount = adjustmentTransaction.Amount,
+                status = adjustmentTransaction.Status,
+                reference = adjustmentTransaction.Reference,
+                message = adjustmentType == "early_return_refund" 
+                    ? $"Refund of {adjustmentTransaction.Amount:F2} {booking.Currency} will be processed for {bookedDays - actualDays} unused day(s)"
+                    : $"Additional charge of {adjustmentTransaction.Amount:F2} {booking.Currency} pending for {actualDays - bookedDays} extra day(s)"
+            } : null,
             recordedBy = userId,
             message = "Trip completed successfully"
         });
