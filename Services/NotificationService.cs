@@ -148,6 +148,7 @@ public class NotificationService : INotificationService
             { "pickup_location", pickupLocation },
             { "return_date", booking.ReturnDateTime.ToString("MMM dd, yyyy") },
             { "return_time", booking.ReturnDateTime.ToString("HH:mm") },
+            { "return_location", FormatLocationFromJson(booking.ReturnLocationJson) },
             { "trip_duration", tripDuration.ToString() },
             { "vehicle_make", booking.Vehicle?.Make ?? "" },
             { "vehicle_model", booking.Vehicle?.Model ?? "" },
@@ -159,8 +160,8 @@ public class NotificationService : INotificationService
             { "total_amount", booking.TotalAmount.ToString("F2") },
             { "qr_link", pickupUrl },
             { "qr_code_image", qrCodeImage },
-            { "support_phone", "+233 XX XXX XXXX" },
-            { "support_email", "support@ryverental.com" }
+            { "support_phone", await GetSupportPhoneAsync(false) },
+            { "support_email", await GetSupportEmailAsync() }
         };
 
         try
@@ -240,7 +241,7 @@ Thank you for choosing Ryve Rental!";
             { "vehicle_make", booking.Vehicle?.Make ?? "" },
             { "vehicle_model", booking.Vehicle?.Model ?? "" },
             { "vehicle_plate", booking.Vehicle?.PlateNumber ?? "" },
-            { "support_phone", "+233 XX XXX XXXX" }
+            { "support_phone", await GetSupportPhoneAsync(false) }
         };
 
         try
@@ -330,6 +331,10 @@ Duration: {(booking.ReturnDateTime.Date - booking.PickupDateTime.Date).Days} day
             : booking.GuestFirstName + " " + booking.GuestLastName;
         var customerPhone = booking.Renter?.Phone ?? booking.GuestPhone;
         var customerEmail = booking.Renter?.Email ?? booking.GuestEmail;
+        
+        // Format location from JSON to user-friendly text
+        var pickupLocation = FormatLocationFromJson(booking.PickupLocationJson);
+        var returnLocation = FormatLocationFromJson(booking.ReturnLocationJson);
 
         // Build placeholders for template
         var placeholders = new Dictionary<string, string>
@@ -341,9 +346,10 @@ Duration: {(booking.ReturnDateTime.Date - booking.PickupDateTime.Date).Days} day
             { "customer_email", customerEmail ?? "" },
             { "pickup_date", booking.PickupDateTime.ToString("MMM dd, yyyy") },
             { "pickup_time", booking.PickupDateTime.ToString("HH:mm") },
-            { "pickup_location", booking.PickupLocationJson ?? "TBD" },
+            { "pickup_location", pickupLocation },
             { "return_date", booking.ReturnDateTime.ToString("MMM dd, yyyy") },
             { "return_time", booking.ReturnDateTime.ToString("HH:mm") },
+            { "return_location", returnLocation },
             { "trip_duration", (booking.ReturnDateTime.Date - booking.PickupDateTime.Date).Days.ToString() },
             { "vehicle_make", booking.Vehicle?.Make ?? "" },
             { "vehicle_model", booking.Vehicle?.Model ?? "" },
@@ -879,8 +885,8 @@ Thank you for your payment!";
             { "vehicle_make", booking.Vehicle?.Make ?? "" },
             { "vehicle_model", booking.Vehicle?.Model ?? "" },
             { "driver_name", booking.WithDriver ? $"{booking.Driver?.FirstName} {booking.Driver?.LastName}".Trim() : "N/A" },
-            { "support_phone", "+233 XX XXX XXXX" },
-            { "support_email", "support@ryverental.com" }
+            { "support_phone", await GetSupportPhoneAsync(false) },
+            { "support_email", await GetSupportEmailAsync() }
         };
 
         try
@@ -932,8 +938,8 @@ See you soon!";
             { "return_location", booking.ReturnLocationJson ?? "TBD" },
             { "vehicle_make", booking.Vehicle?.Make ?? "" },
             { "vehicle_model", booking.Vehicle?.Model ?? "" },
-            { "support_phone", "+233 XX XXX XXXX" },
-            { "support_email", "support@ryverental.com" }
+            { "support_phone", await GetSupportPhoneAsync(false) },
+            { "support_email", await GetSupportEmailAsync() }
         };
 
         try
@@ -1258,7 +1264,7 @@ Check your dashboard for details.";
                     { "currency", booking.Currency },
                     { "total_amount", booking.TotalAmount.ToString("F2") },
                     { "deposit_amount", booking.DepositAmount.ToString("F2") },
-                    { "support_email", "support@ryverental.com" }
+                    { "support_email", await GetSupportEmailAsync() }
                 };
 
                 var htmlMessage = await _emailTemplateService.RenderTemplateAsync("booking_completed_customer", placeholders);
@@ -1346,6 +1352,81 @@ Questions? Contact support@ryverental.com";
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error sending booking completed notifications for {BookingRef}", booking.BookingReference);
+        }
+    }
+    
+    private async Task<string> GetSupportPhoneAsync(bool forWhatsApp = false)
+    {
+        try
+        {
+            var configKey = forWhatsApp ? "support_phone_whatsapp" : "support_phone_email";
+            var config = await _db.AppConfigs.FirstOrDefaultAsync(c => c.ConfigKey == configKey);
+            
+            if (config != null && !string.IsNullOrWhiteSpace(config.ConfigValue))
+                return config.ConfigValue;
+            
+            // Fallback to default
+            return forWhatsApp ? "+233535944564" : "+233 53 594 4564";
+        }
+        catch
+        {
+            return forWhatsApp ? "+233535944564" : "+233 53 594 4564";
+        }
+    }
+    
+    private async Task<string> GetSupportEmailAsync()
+    {
+        try
+        {
+            var config = await _db.AppConfigs.FirstOrDefaultAsync(c => c.ConfigKey == "support_email");
+            return config?.ConfigValue ?? "support@ryverental.com";
+        }
+        catch
+        {
+            return "support@ryverental.com";
+        }
+    }
+    
+    private string FormatLocationFromJson(string? locationJson)
+    {
+        if (string.IsNullOrWhiteSpace(locationJson))
+            return "To Be Determined";
+        
+        try
+        {
+            using var doc = JsonDocument.Parse(locationJson);
+            var root = doc.RootElement;
+            
+            // Check location type
+            if (root.TryGetProperty("type", out var typeElement))
+            {
+                var locationType = typeElement.GetString();
+                
+                if (locationType == "city" && root.TryGetProperty("cityName", out var cityName))
+                {
+                    return cityName.GetString() ?? "City Location";
+                }
+                else if (locationType == "airport" && root.TryGetProperty("airportName", out var airportName))
+                {
+                    return airportName.GetString() ?? "Airport";
+                }
+                else if (locationType == "custom" && root.TryGetProperty("address", out var address))
+                {
+                    return address.GetString() ?? "Custom Location";
+                }
+            }
+            
+            // Fallback: try common properties
+            if (root.TryGetProperty("cityName", out var fallbackCity))
+                return fallbackCity.GetString() ?? locationJson;
+            if (root.TryGetProperty("address", out var fallbackAddress))
+                return fallbackAddress.GetString() ?? locationJson;
+            
+            return locationJson; // Return as-is if structure is unexpected
+        }
+        catch
+        {
+            return locationJson; // Return as-is if parsing fails
         }
     }
 }

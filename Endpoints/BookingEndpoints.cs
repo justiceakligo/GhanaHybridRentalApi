@@ -1629,6 +1629,19 @@ public static class BookingEndpoints
         booking.Status = "completed";
         booking.UpdatedAt = DateTime.UtcNow;
         
+        // Cancel any pending return reminder notifications (trip already completed)
+        var pendingReturnReminders = await db.NotificationJobs
+            .Where(j => j.Status == "pending" && 
+                       j.TemplateName == "return_reminder" &&
+                       j.MetadataJson.Contains(booking.Id.ToString()))
+            .ToListAsync();
+        
+        foreach (var reminder in pendingReturnReminders)
+        {
+            reminder.Status = "cancelled";
+            reminder.UpdatedAt = DateTime.UtcNow;
+        }
+        
         // Send booking completed notifications
         try
         {
