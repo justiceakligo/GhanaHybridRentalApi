@@ -1,0 +1,45 @@
+# Build results
+bin/
+obj/
+publish/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+
+# Environment and secrets
+*.Production.json
+admin_token.txt
+appsettings.Development.json
+aci-env.json
+appconfigs.json
+deployment-*.json
+
+# All deployment scripts (contain sensitive keys)
+deploy-*.ps1
+deploy-*.yaml
+deployment-*.json
+
+# Database backups
+backups/
+
+# Docker
+containers.json
+
+# Test results
+tests/
+
+# VS Code
+.vscode/
+
+# Mac
+.DS_Store
+
+# Node modules (if any)
+node_modules/
+
+# Uploads
+uploads/
