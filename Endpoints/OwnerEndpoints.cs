@@ -1023,6 +1023,12 @@ public static class OwnerEndpoints
                 user.OwnerProfile.CompanyName,
                 user.OwnerProfile.BusinessRegistrationNumber,
                 user.OwnerProfile.PayoutPreference,
+                user.OwnerProfile.BusinessPhone,
+                user.OwnerProfile.BusinessAddress,
+                user.OwnerProfile.GpsAddress,
+                user.OwnerProfile.PickupInstructions,
+                user.OwnerProfile.City,
+                user.OwnerProfile.Region,
                 payoutDetails = user.OwnerProfile.PayoutDetailsJson == null ? null : JsonSerializer.Deserialize<object>(user.OwnerProfile.PayoutDetailsJson),
                 payoutVerificationStatus = user.OwnerProfile.PayoutVerificationStatus,
                 payoutDetailsPending = user.OwnerProfile.PayoutDetailsPendingJson == null ? null : JsonSerializer.Deserialize<object>(user.OwnerProfile.PayoutDetailsPendingJson)
@@ -1079,6 +1085,25 @@ public static class OwnerEndpoints
             user.OwnerProfile.PayoutVerificationStatus = "pending";
             await db.ProfileChangeAudits.AddAsync(new ProfileChangeAudit { UserId = user.Id, Field = "PayoutDetails", OldValue = user.OwnerProfile.PayoutDetailsJson, NewValue = user.OwnerProfile.PayoutDetailsPendingJson, ChangedByUserId = user.Id });
         }
+
+        // Update contact and location fields
+        if (payload.TryGetProperty("businessPhone", out var bp))
+            user.OwnerProfile.BusinessPhone = bp.GetString();
+
+        if (payload.TryGetProperty("businessAddress", out var ba))
+            user.OwnerProfile.BusinessAddress = ba.GetString();
+
+        if (payload.TryGetProperty("gpsAddress", out var ga))
+            user.OwnerProfile.GpsAddress = ga.GetString();
+
+        if (payload.TryGetProperty("pickupInstructions", out var pi))
+            user.OwnerProfile.PickupInstructions = pi.GetString();
+
+        if (payload.TryGetProperty("city", out var city))
+            user.OwnerProfile.City = city.GetString();
+
+        if (payload.TryGetProperty("region", out var region))
+            user.OwnerProfile.Region = region.GetString();
 
         await db.SaveChangesAsync();
 

@@ -1698,10 +1698,23 @@ public static class AdminEndpoints
             .Where(b => b.CreatedAt >= last30Days && b.Status == "completed")
             .SumAsync(b => b.TotalAmount);
 
+        // Vehicle category breakdown
+        var vehiclesByCategory = await db.Vehicles
+            .GroupBy(v => v.Category)
+            .Select(g => new { category = g.Key, count = g.Count() })
+            .ToListAsync();
+
+        var byCategory = vehiclesByCategory.Select(vc => new
+        {
+            category = vc.category,
+            count = vc.count,
+            percentage = totalVehicles > 0 ? (double)vc.count / totalVehicles * 100 : 0
+        }).ToList();
+
         return Results.Ok(new
         {
             users = new { total = totalUsers, renters = totalRenters, owners = totalOwners, activeOwners },
-            vehicles = new { total = totalVehicles, active = activeVehicles },
+            vehicles = new { total = totalVehicles, active = activeVehicles, byCategory },
             bookings = new { total = totalBookings, completed = completedBookings, active = activeBookings },
             revenue = new { total = totalRevenue, last30Days = recentRevenue },
             activity = new { bookingsLast30Days = recentBookings }
@@ -1754,82 +1767,116 @@ public static class AdminEndpoints
         var fromDate = from ?? DateTime.UtcNow.AddMonths(-1);
         var toDate = to ?? DateTime.UtcNow;
 
-        var bookings = await db.Bookings
-            .Where(b => b.CreatedAt >= fromDate && b.CreatedAt <= toDate)
+        // Get all paid payments with their bookings
+        var paidPayments = await db.PaymentTransactions
+            .Include(p => p.Booking)
+            .Where(p => p.Type == "payment" 
+                && p.Status == "completed" 
+                && p.CompletedAt.HasValue
+                && p.CompletedAt.Value >= fromDate 
+                && p.CompletedAt.Value <= toDate)
             .ToListAsync();
 
-        var payments = await db.PaymentTransactions
-            .Where(p => p.Type == "payment" && p.CreatedAt >= fromDate && p.CreatedAt <= toDate)
+        var bookingIds = paidPayments.Select(p => p.BookingId).Distinct().ToList();
+        var paidBookings = await db.Bookings
+            .Where(b => bookingIds.Contains(b.Id) && b.PaymentStatus == "paid")
             .ToListAsync();
 
-        // Completed bookings revenue
-        var completedBookings = bookings.Where(b => b.Status == "completed").ToList();
-        var totalRevenue = completedBookings.Sum(b => b.TotalAmount);
+        var totalRevenue = paidBookings.Sum(b => b.TotalAmount);
         
         // Separate platform revenues (admin keeps these)
-        var protectionPlanRevenue = completedBookings.Sum(b => b.ProtectionAmount ?? 0);
-        var platformFeeRevenue = completedBookings.Sum(b => b.PlatformFee ?? 0);
-        var insuranceRevenue = completedBookings.Sum(b => b.InsuranceAmount ?? 0);
-        var depositRevenue = completedBookings.Sum(b => b.DepositAmount);
+        var protectionPlanRevenue = paidBookings.Sum(b => b.ProtectionAmount ?? 0);
+        var platformFeeRevenue = paidBookings.Sum(b => b.PlatformFee ?? 0);
+        var insuranceRevenue = paidBookings.Sum(b => b.InsuranceAmount ?? 0);
+        var depositRevenue = paidBookings.Sum(b => b.DepositAmount);
         
         // Owner revenue (rental + driver fees - platform commission)
-        var ownerRevenue = completedBookings.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0));
+        var ownerRevenue = paidBookings.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0));
 
-        // Paid vs Pending/Expected
-        var paidBookings = bookings.Where(b => payments.Any(p => p.BookingId == b.Id && p.Status == "completed")).ToList();
-        var totalPaid = paidBookings.Sum(b => b.TotalAmount);
-        var paidProtectionPlan = paidBookings.Sum(b => b.ProtectionAmount ?? 0);
-        var paidPlatformFee = paidBookings.Sum(b => b.PlatformFee ?? 0);
-        var paidInsurance = paidBookings.Sum(b => b.InsuranceAmount ?? 0);
-        var paidDeposits = paidBookings.Sum(b => b.DepositAmount);
-        // Owner receives: rental + driver fees - platform commission
-        var paidToOwners = paidBookings.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0));
-
-        var pendingBookings = bookings.Where(b => 
-            (b.Status == "confirmed" || b.Status == "active") && 
-            !payments.Any(p => p.BookingId == b.Id && p.Status == "completed")).ToList();
-        var expectedRevenue = pendingBookings.Sum(b => b.TotalAmount);
-        var expectedProtectionPlan = pendingBookings.Sum(b => b.ProtectionAmount ?? 0);
-        var expectedPlatformFee = pendingBookings.Sum(b => b.PlatformFee ?? 0);
-        var expectedInsurance = pendingBookings.Sum(b => b.InsuranceAmount ?? 0);
-        // Owner receives: rental + driver fees - platform commission
-        var expectedOwnerRevenue = pendingBookings.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0));
-
-        var revenueByDay = completedBookings
-            .GroupBy(b => b.CreatedAt.Date)
-            .Select(g => new 
-            { 
-                date = g.Key, 
-                totalRevenue = g.Sum(b => b.TotalAmount),
-                protectionRevenue = g.Sum(b => b.ProtectionAmount ?? 0),
-                platformFeeRevenue = g.Sum(b => b.PlatformFee ?? 0),
-                insuranceRevenue = g.Sum(b => b.InsuranceAmount ?? 0),
-                // Owner receives: rental + driver fees - platform commission
-                ownerRevenue = g.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0)),
-                bookings = g.Count() 
+        // Group by payment completion date for time series
+        var revenueByDay = paidPayments
+            .Where(p => p.CompletedAt.HasValue)
+            .GroupBy(p => p.CompletedAt!.Value.Date)
+            .Select(g => 
+            {
+                var dayBookingIds = g.Select(p => p.BookingId).ToList();
+                var dayBookings = paidBookings.Where(b => dayBookingIds.Contains(b.Id)).ToList();
+                return new 
+                { 
+                    date = g.Key, 
+                    totalRevenue = dayBookings.Sum(b => b.TotalAmount),
+                    protectionRevenue = dayBookings.Sum(b => b.ProtectionAmount ?? 0),
+                    platformFeeRevenue = dayBookings.Sum(b => b.PlatformFee ?? 0),
+                    insuranceRevenue = dayBookings.Sum(b => b.InsuranceAmount ?? 0),
+                    ownerRevenue = dayBookings.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0)),
+                    bookings = dayBookings.Count
+                };
             })
             .OrderBy(x => x.date)
             .ToList();
 
-        var revenueByMonth = completedBookings
-            .GroupBy(b => new { b.CreatedAt.Year, b.CreatedAt.Month })
-            .Select(g => new 
-            { 
-                year = g.Key.Year, 
-                month = g.Key.Month, 
-                totalRevenue = g.Sum(b => b.TotalAmount),
-                protectionRevenue = g.Sum(b => b.ProtectionAmount ?? 0),
-                platformFeeRevenue = g.Sum(b => b.PlatformFee ?? 0),
-                insuranceRevenue = g.Sum(b => b.InsuranceAmount ?? 0),
-                // Owner receives: rental + driver fees - platform commission
-                ownerRevenue = g.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0)),
-                bookings = g.Count() 
+        var revenueByMonth = paidPayments
+            .Where(p => p.CompletedAt.HasValue)
+            .GroupBy(p => new { p.CompletedAt!.Value.Year, p.CompletedAt.Value.Month })
+            .Select(g => 
+            {
+                var monthBookingIds = g.Select(p => p.BookingId).ToList();
+                var monthBookings = paidBookings.Where(b => monthBookingIds.Contains(b.Id)).ToList();
+                return new 
+                { 
+                    year = g.Key.Year, 
+                    month = g.Key.Month, 
+                    totalRevenue = monthBookings.Sum(b => b.TotalAmount),
+                    protectionRevenue = monthBookings.Sum(b => b.ProtectionAmount ?? 0),
+                    platformFeeRevenue = monthBookings.Sum(b => b.PlatformFee ?? 0),
+                    insuranceRevenue = monthBookings.Sum(b => b.InsuranceAmount ?? 0),
+                    ownerRevenue = monthBookings.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0)),
+                    bookings = monthBookings.Count
+                };
             })
             .OrderBy(x => x.year).ThenBy(x => x.month)
             .ToList();
 
-        var totalBookings = completedBookings.Count;
+        var totalBookings = paidBookings.Count;
         var avgRevenuePerBooking = totalBookings > 0 ? totalRevenue / totalBookings : 0;
+
+        // Calculate previous period for trending
+        var periodLength = (toDate - fromDate).Days;
+        var prevFromDate = fromDate.AddDays(-periodLength);
+        var prevToDate = fromDate.AddDays(-1);
+
+        var prevPaidPayments = await db.PaymentTransactions
+            .Include(p => p.Booking)
+            .Where(p => p.Type == "payment" 
+                && p.Status == "completed" 
+                && p.CompletedAt.HasValue
+                && p.CompletedAt.Value >= prevFromDate 
+                && p.CompletedAt.Value <= prevToDate)
+            .ToListAsync();
+
+        var prevBookingIds = prevPaidPayments.Select(p => p.BookingId).Distinct().ToList();
+        var prevPaidBookings = await db.Bookings
+            .Where(b => prevBookingIds.Contains(b.Id) && b.PaymentStatus == "paid")
+            .ToListAsync();
+
+        var prevTotalRevenue = prevPaidBookings.Sum(b => b.TotalAmount);
+        var revenueChange = prevTotalRevenue > 0 
+            ? ((totalRevenue - prevTotalRevenue) / prevTotalRevenue * 100) 
+            : 0;
+
+        var prevTotalBookings = prevPaidBookings.Count;
+        var bookingsChange = prevTotalBookings > 0
+            ? ((double)(totalBookings - prevTotalBookings) / prevTotalBookings * 100)
+            : 0;
+
+        // Revenue forecasting from active/confirmed bookings
+        var forecastBookings = await db.Bookings
+            .Where(b => b.Status == "confirmed" || b.Status == "active")
+            .ToListAsync();
+
+        var expectedRevenue = forecastBookings.Sum(b => b.TotalAmount);
+        var expectedPlatformRevenue = forecastBookings.Sum(b => (b.ProtectionAmount ?? 0) + (b.PlatformFee ?? 0) + (b.InsuranceAmount ?? 0));
+        var expectedOwnerRevenue = forecastBookings.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0));
 
         return Results.Ok(new
         {
@@ -1838,22 +1885,37 @@ public static class AdminEndpoints
             {
                 totalRevenue,
                 protectionPlanRevenue, // Platform keeps this
+                platformFeeRevenue, // Platform fee
+                insuranceRevenue, // Insurance revenue
                 ownerRevenue, // Amount owed to owners
                 totalBookings,
                 avgRevenuePerBooking
             },
-            paymentStatus = new
+            trending = new
             {
-                totalPaid,
-                paidProtectionPlan,
-                paidToOwners,
-                expectedRevenue,
-                expectedProtectionPlan,
-                expectedOwnerRevenue,
-                pendingBookingsCount = pendingBookings.Count
+                revenueChangePercent = Math.Round(revenueChange, 2),
+                bookingsChangePercent = Math.Round(bookingsChange, 2),
+                previousPeriod = new
+                {
+                    from = prevFromDate,
+                    to = prevToDate,
+                    revenue = prevTotalRevenue,
+                    bookings = prevTotalBookings
+                }
             },
-            revenueByDay,
-            revenueByMonth
+            forecast = new
+            {
+                expectedRevenue,
+                expectedPlatformRevenue,
+                expectedOwnerRevenue,
+                pendingBookings = forecastBookings.Count,
+                note = "Based on confirmed and active bookings"
+            },
+            breakdown = new
+            {
+                revenueByDay,
+                revenueByMonth
+            }
         });
     }
 
@@ -1974,8 +2036,14 @@ public static class AdminEndpoints
         return Results.Ok(new { summary, owners = ownerPayouts });
     }
 
-    private static async Task<IResult> GetCityAnalyticsAsync(AppDbContext db)
+    private static async Task<IResult> GetCityAnalyticsAsync(
+        AppDbContext db,
+        [FromQuery] DateTime? from,
+        [FromQuery] DateTime? to)
     {
+        var fromDate = from ?? DateTime.UtcNow.AddMonths(-1);
+        var toDate = to ?? DateTime.UtcNow;
+
         // Get all cities
         var cities = await db.Cities
             .Where(c => c.IsActive)
@@ -1993,12 +2061,38 @@ public static class AdminEndpoints
 
             var vehicleIds = vehicles.Select(v => v.Id).ToList();
 
-            // Get bookings for vehicles in this city
-            var bookings = await db.Bookings
-                .Where(b => vehicleIds.Contains(b.VehicleId))
+            // Get paid bookings for vehicles in this city within date range
+            var paidBookingIds = await db.PaymentTransactions
+                .Where(p => p.Type == "payment" 
+                    && p.Status == "completed"
+                    && p.CompletedAt.HasValue
+                    && p.CompletedAt.Value >= fromDate
+                    && p.CompletedAt.Value <= toDate)
+                .Select(p => p.BookingId)
+                .Distinct()
                 .ToListAsync();
 
+            var bookings = await db.Bookings
+                .Where(b => vehicleIds.Contains(b.VehicleId) && b.PaymentStatus == "paid" && paidBookingIds.Contains(b.Id))
+                .ToListAsync();
+
+            // Booking status breakdown
+            var statusBreakdown = new
+            {
+                confirmed = bookings.Count(b => b.Status == "confirmed"),
+                active = bookings.Count(b => b.Status == "active"),
+                completed = bookings.Count(b => b.Status == "completed"),
+                cancelled = bookings.Count(b => b.Status == "cancelled")
+            };
+
             var completedBookings = bookings.Where(b => b.Status == "completed").ToList();
+            var totalRevenue = completedBookings.Sum(b => b.TotalAmount);
+            var avgRevenue = completedBookings.Any() ? completedBookings.Average(b => b.TotalAmount) : 0;
+
+            // Calculate average booking duration (in days)
+            var avgDuration = completedBookings.Any()
+                ? completedBookings.Average(b => (b.ReturnDateTime - b.PickupDateTime).TotalDays)
+                : 0;
 
             cityAnalytics.Add(new
             {
@@ -2008,14 +2102,19 @@ public static class AdminEndpoints
                 activeVehicles = vehicles.Count(v => v.Status == "active"),
                 totalBookings = bookings.Count,
                 completedBookings = completedBookings.Count,
-                totalRevenue = completedBookings.Sum(b => b.TotalAmount),
-                averageBookingValue = completedBookings.Any() 
-                    ? completedBookings.Average(b => b.TotalAmount) 
-                    : 0
+                totalRevenue,
+                avgRevenuePerBooking = avgRevenue,
+                avgBookingDuration = Math.Round(avgDuration, 1),
+                utilizationRate = vehicles.Count > 0 ? (double)bookings.Count / vehicles.Count : 0,
+                byStatus = statusBreakdown
             });
         }
 
-        return Results.Ok(new { cities = cityAnalytics });
+        return Results.Ok(new 
+        { 
+            period = new { from = fromDate, to = toDate },
+            cities = cityAnalytics 
+        });
     }
 
     private static async Task<IResult> GetOwnerVerificationsAsync(
@@ -2616,9 +2715,31 @@ public static class AdminEndpoints
             NewValue = "active", 
             ChangedByUserId = null 
         });
+        
+        // Send welcome email to approved owner
+        await db.NotificationJobs.AddAsync(new NotificationJob
+        {
+            TargetUserId = userId,
+            TargetEmail = user.Email,
+            ChannelsJson = "[\"email\"]",
+            TemplateName = "owner_account_approved",
+            Subject = "Your Owner Account Has Been Approved!",
+            Message = "Congratulations! Your owner account has been approved.",
+            MetadataJson = JsonSerializer.Serialize(new
+            {
+                ownerName = $"{user.FirstName} {user.LastName}",
+                email = user.Email,
+                loginUrl = "https://ryverental.info/login",
+                dashboardUrl = "https://ryverental.info/owner/dashboard"
+            }),
+            Status = "pending",
+            SendImmediately = true,
+            CreatedAt = DateTime.UtcNow
+        });
+        
         await db.SaveChangesAsync();
 
-        return Results.Ok(new { success = true, message = "Owner account approved and activated", status = "active" });
+        return Results.Ok(new { success = true, message = "Owner account approved and activated. Welcome email will be sent.", status = "active" });
     }
 
     private static async Task<IResult> RejectOwnerAccountAsync(

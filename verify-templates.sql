@@ -1,0 +1,1 @@
+SELECT "TemplateName", "Subject" FROM "EmailTemplates" WHERE "TemplateName" IN ('pickup_reminder', 'return_reminder', 'booking_confirmation_customer', 'booking_confirmation_owner', 'booking_completed_customer', 'booking_completed_owner') ORDER BY "TemplateName";

@@ -759,25 +759,43 @@ public static class PaymentEndpoints
                 {
                     // Get exchange rate from GlobalSettings (admin-configured)
                     var exchangeRateSetting = await db.GlobalSettings.FirstOrDefaultAsync(s => s.Key == "usd_to_ghs_rate");
-                    decimal usdToGhsRate = 15.5m; // Default fallback
+                    decimal usdToGhsRate = 11.5m; // Default fallback (1 USD = 11.5 GHS)
+                    string rateSource = "default";
                     
                     if (exchangeRateSetting != null && !string.IsNullOrWhiteSpace(exchangeRateSetting.ValueJson))
                     {
                         // Try to parse the ValueJson which might be a simple number or a JSON object
                         try
                         {
-                            if (decimal.TryParse(exchangeRateSetting.ValueJson.Trim('"'), out var parsedRate))
+                            var valueJson = exchangeRateSetting.ValueJson.Trim().Trim('"');
+                            if (decimal.TryParse(valueJson, out var parsedRate) && parsedRate > 0)
                             {
                                 usdToGhsRate = parsedRate;
+                                rateSource = "database";
+                                Console.WriteLine($"✅ Using exchange rate from database: 1 USD = {usdToGhsRate} GHS");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"⚠️ Invalid rate in database: '{valueJson}'. Using default: {usdToGhsRate}");
                             }
                         }
-                        catch { /* Use default rate */ }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"⚠️ Error parsing exchange rate from database: {ex.Message}. Using default: {usdToGhsRate}");
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine($"⚠️ No exchange rate found in database (Key: usd_to_ghs_rate). Using default: {usdToGhsRate}");
                     }
                     
                     amountToCharge = Math.Round(booking.TotalAmount / usdToGhsRate, 2);
                     metadata["original_amount"] = booking.TotalAmount.ToString();
                     metadata["original_currency"] = "GHS";
                     metadata["exchange_rate"] = usdToGhsRate.ToString();
+                    metadata["exchange_rate_source"] = rateSource;
+                    
+                    Console.WriteLine($"💰 Stripe Payment Conversion: {booking.TotalAmount} GHS ÷ {usdToGhsRate} ({rateSource}) = ${amountToCharge} USD");
                 }
                 
                 var intent = await stripeService.CreatePaymentIntentAsync(amountToCharge, currency, customerId, metadata);

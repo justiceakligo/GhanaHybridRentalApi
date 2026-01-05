@@ -48,6 +48,23 @@ public class OwnerProfile
     [MaxLength(128)]
     public string? BusinessRegistrationNumberPending { get; set; }
 
+    // Contact and location information for renters
+    [MaxLength(32)]
+    public string? BusinessPhone { get; set; }
+
+    public string? BusinessAddress { get; set; }
+
+    [MaxLength(128)]
+    public string? GpsAddress { get; set; } // Ghana GPS address (e.g., GA-123-4567)
+
+    public string? PickupInstructions { get; set; }
+
+    [MaxLength(128)]
+    public string? City { get; set; }
+
+    [MaxLength(128)]
+    public string? Region { get; set; }
+
     public string? Bio { get; set; }
 
     public string? NotificationPreferencesJson { get; set; }

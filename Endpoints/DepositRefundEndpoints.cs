@@ -269,8 +269,10 @@ public static class DepositRefundEndpoints
                     BookingId = refund.BookingId,
                     TargetUserId = refund.Booking.Renter.Id,
                     ChannelsJson = JsonSerializer.Serialize(new[]{"inapp","email","whatsapp"}),
-                    Subject = "Refund processed",
+                    TemplateName = "deposit_refund_processed",
+                    Subject = "Deposit Refund Processed",
                     Message = $"Your refund for booking {refund.Booking.BookingReference} has been processed. Amount: {refund.Currency} {refund.Amount:F2}",
+                    MetadataJson = JsonSerializer.Serialize(new { amount = refund.Amount, currency = refund.Currency, bookingReference = refund.Booking.BookingReference }),
                     SendImmediately = true
                 };
                 await notifications.CreateNotificationJobAsync(job);

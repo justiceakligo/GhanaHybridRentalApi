@@ -88,6 +88,7 @@ public static class BookingEndpoints
         var userRole = user.Role ?? string.Empty;
 
         var query = db.Bookings
+            .Include(b => b.Renter)
             .Include(b => b.Vehicle)
                 .ThenInclude(v => v!.Category)
             .Include(b => b.Vehicle)
@@ -812,7 +813,13 @@ public static class BookingEndpoints
             PromoDiscountAmount = promoDiscountAmount,
             PaymentMethod = rPaymentMethod.ToLowerInvariant(),
             Status = "pending_payment",
-            PaymentStatus = "unpaid"
+            PaymentStatus = "unpaid",
+            CreatedAt = DateTime.UtcNow,
+            // Populate guest fields for guest bookings
+            GuestEmail = guestRequest?.GuestEmail,
+            GuestPhone = guestRequest?.GuestPhone,
+            GuestFirstName = guestRequest?.GuestFirstName,
+            GuestLastName = guestRequest?.GuestLastName
         };
 
         db.Bookings.Add(booking);

@@ -241,7 +241,11 @@ public static class RentalAgreementEndpoints
         if (booking2 is null) return Results.NotFound(new { error = "Booking not found" });
 
         var providedEmail = request.CustomerEmail.Trim().ToLowerInvariant();
-        var bookingEmail = booking2.GuestEmail?.Trim().ToLowerInvariant() ?? booking2.Renter?.Email?.Trim().ToLowerInvariant();
+        // Try GuestEmail first, fallback to Renter.Email for backwards compatibility
+        var bookingEmail = !string.IsNullOrWhiteSpace(booking2.GuestEmail) 
+            ? booking2.GuestEmail.Trim().ToLowerInvariant()
+            : booking2.Renter?.Email?.Trim().ToLowerInvariant();
+            
         if (string.IsNullOrWhiteSpace(bookingEmail) || bookingEmail != providedEmail)
             return Results.Json(new { error = "Customer email does not match booking" }, statusCode: 401);
 

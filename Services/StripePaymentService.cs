@@ -67,26 +67,34 @@ public interface IStripePaymentService
             // Handle GHS to USD conversion for Stripe (which doesn't support GHS widely)
             if (stripeCurrency == "ghs")
             {
-                // Get exchange rate from config (default: 1 USD = 11 GHS)
+                // Get exchange rate from config (default: 1 USD = 11.5 GHS)
                 var exchangeRateStr = await _configService.GetConfigValueAsync("Payment:ExchangeRate:GHS_To_USD");
-                var exchangeRate = 11.0m; // Default: 1 USD = 11 GHS
+                var exchangeRate = 11.5m; // Default: 1 USD = 11.5 GHS
+                string rateSource = "default";
                 
                 if (!string.IsNullOrWhiteSpace(exchangeRateStr) && decimal.TryParse(exchangeRateStr, out var rate) && rate > 0)
                 {
                     exchangeRate = rate;
+                    rateSource = "config";
+                    _logger.LogInformation("Using exchange rate from config: 1 USD = {Rate} GHS", exchangeRate);
+                }
+                else
+                {
+                    _logger.LogWarning("No valid exchange rate in config (Payment:ExchangeRate:GHS_To_USD). Using default: 1 USD = {Rate} GHS", exchangeRate);
                 }
                 
                 // Convert GHS to USD
                 stripeAmount = amount / exchangeRate;
                 stripeCurrency = "usd";
                 
-                _logger.LogInformation("Converting {AmountGHS} GHS to {AmountUSD} USD using rate 1:{Rate}", 
-                    amount, stripeAmount, exchangeRate);
+                _logger.LogInformation("Converting {AmountGHS} GHS to {AmountUSD} USD using rate 1:{Rate} (source: {Source})", 
+                    amount, stripeAmount, exchangeRate, rateSource);
                 
                 // Store original currency in metadata for reference
                 metadata["original_currency"] = currency.ToUpper();
                 metadata["original_amount"] = amount.ToString("F2");
                 metadata["exchange_rate"] = exchangeRate.ToString("F2");
+                metadata["exchange_rate_source"] = rateSource;
             }
             
             var options = new PaymentIntentCreateOptions

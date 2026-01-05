@@ -138,6 +138,17 @@ public class NotificationService : INotificationService
         // Calculate trip duration in days
         var tripDuration = (int)Math.Ceiling((booking.ReturnDateTime - booking.PickupDateTime).TotalDays);
 
+        // Get owner information for contact details
+        var owner = await _db.Users
+            .Include(u => u.OwnerProfile)
+            .FirstOrDefaultAsync(u => u.Id == booking.OwnerId);
+        
+        var ownerName = owner != null ? $"{owner.FirstName} {owner.LastName}".Trim() : "Vehicle Owner";
+        var ownerPhone = owner?.OwnerProfile?.BusinessPhone ?? owner?.Phone ?? "Contact support";
+        var ownerAddress = owner?.OwnerProfile?.BusinessAddress ?? pickupLocation;
+        var ownerGpsAddress = owner?.OwnerProfile?.GpsAddress ?? "";
+        var pickupInstructions = owner?.OwnerProfile?.PickupInstructions ?? "Contact owner for pickup details";
+
         // Build placeholders for template
         var placeholders = new Dictionary<string, string>
         {
@@ -160,6 +171,12 @@ public class NotificationService : INotificationService
             { "total_amount", booking.TotalAmount.ToString("F2") },
             { "qr_link", pickupUrl },
             { "qr_code_image", qrCodeImage },
+            { "owner_name", ownerName },
+            { "owner_phone", ownerPhone },
+            { "owner_address", ownerAddress },
+            { "owner_gps_address", ownerGpsAddress },
+            { "pickup_instructions", pickupInstructions },
+            { "inspection_link", pickupUrl },
             { "support_phone", await GetSupportPhoneAsync(false) },
             { "support_email", await GetSupportEmailAsync() }
         };
@@ -173,9 +190,10 @@ public class NotificationService : INotificationService
             // Send WhatsApp (simplified text version)
             if (!string.IsNullOrEmpty(booking.Renter.Phone))
             {
-                var whatsappMsg = $@"🎉 Booking Confirmed!
+                var whatsappMsg = $@"🔖 Booking Reserved!
 
 Ref: {booking.BookingReference}
+Status: ⚠️ PENDING PAYMENT
 
 📅 Pickup: {booking.PickupDateTime:MMM dd, yyyy @ HH:mm}
 📍 Location: {booking.PickupLocationJson ?? "TBD"}
@@ -185,6 +203,8 @@ Ref: {booking.BookingReference}
 💰 Total: {booking.Currency} {booking.TotalAmount:F2}
 
 {(booking.WithDriver ? "👨‍💼 With Professional Driver" : "🚗 Self-Drive")}
+
+⚡ Complete payment to confirm your booking.
 
 {(!string.IsNullOrEmpty(pickupUrl) ? $"✳️ Express Check-in: {pickupUrl}" : "")}
 
@@ -581,8 +601,8 @@ CREATE INDEX IF NOT EXISTS ""IX_NotificationJobs_ScheduledAt"" ON ""Notification
                     booking = await _db.Bookings.Include(b => b.Renter).Include(b => b.Vehicle).FirstOrDefaultAsync(b => b.Id == job.BookingId.Value);
                 }
                 
-                // Handle special notification types
-                if (job.TemplateName == "pickup_reminder" || job.TemplateName == "return_reminder")
+                // Handle special notification types with templates
+                if (job.TemplateName == "pickup_reminder" || job.TemplateName == "return_reminder" || job.TemplateName == "deposit_refund_processed" || job.TemplateName == "owner_account_approved")
                 {
                     // Extract booking ID from metadata
                     if (!string.IsNullOrWhiteSpace(job.MetadataJson))
@@ -609,6 +629,99 @@ CREATE INDEX IF NOT EXISTS ""IX_NotificationJobs_ScheduledAt"" ON ""Notification
                                     {
                                         await SendReturnReminderAsync(booking);
                                     }
+                                    else if (job.TemplateName == "deposit_refund_processed")
+                                    {
+                                        // Send deposit refund notification with template
+                                        var email = booking.Renter?.Email ?? booking.GuestEmail;
+                                        if (!string.IsNullOrWhiteSpace(email))
+                                        {
+                                            var amount = "0.00";
+                                            var currency = booking.Currency;
+                                            var bookingReference = booking.BookingReference;
+                                            
+                                            // Parse metadata for actual refund details
+                                            try
+                                            {
+                                                using var metaDoc = JsonDocument.Parse(job.MetadataJson);
+                                                if (metaDoc.RootElement.TryGetProperty("amount", out var amountEl))
+                                                    amount = amountEl.GetDecimal().ToString("F2");
+                                                if (metaDoc.RootElement.TryGetProperty("currency", out var currencyEl))
+                                                    currency = currencyEl.GetString() ?? currency;
+                                                if (metaDoc.RootElement.TryGetProperty("bookingReference", out var refEl))
+                                                    bookingReference = refEl.GetString() ?? bookingReference;
+                                            }
+                                            catch { }
+                                            
+                                            var placeholders = new Dictionary<string, string>
+                                            {
+                                                { "customer_name", booking.Renter?.FirstName ?? "Valued Customer" },
+                                                { "amount", amount },
+                                                { "currency", currency },
+                                                { "booking_reference", bookingReference },
+                                                { "vehicle_name", $"{booking.Vehicle?.Make} {booking.Vehicle?.Model}" },
+                                                { "booking_id", booking.Id.ToString() }
+                                            };
+                                            
+                                            var htmlMessage = await _emailTemplateService.RenderTemplateAsync("deposit_refund_processed", placeholders);
+                                            var subject = await _emailTemplateService.RenderSubjectAsync("deposit_refund_processed", placeholders);
+                                            
+                                            await _emailService.SendEmailAsync(email, subject, htmlMessage);
+                                            
+                                            // Send WhatsApp notification too
+                                            var phone = booking.Renter?.Phone ?? booking.GuestPhone;
+                                            if (!string.IsNullOrWhiteSpace(phone))
+                                            {
+                                                var whatsappMessage = $"💰 Deposit Refund Processed\n\nYour refund of {currency} {amount} for booking {bookingReference} has been processed successfully.\n\nThe funds should reflect in your mobile money account within 5-10 minutes.\n\nThank you for choosing Ryve Rental!";
+                                                await _whatsAppSender.SendBookingNotificationAsync(phone, whatsappMessage);
+                                            }
+                                        }
+                                    }
+                                    else if (job.TemplateName == "owner_account_approved")
+                                    {
+                                        // Send owner account approval notification
+                                        if (!string.IsNullOrWhiteSpace(job.TargetEmail))
+                                        {
+                                            try
+                                            {
+                                                var ownerName = "Owner";
+                                                var email = job.TargetEmail;
+                                                var loginUrl = "https://ryverental.info/login";
+                                                var dashboardUrl = "https://ryverental.info/owner/dashboard";
+                                                
+                                                // Parse metadata if available
+                                                if (!string.IsNullOrWhiteSpace(job.MetadataJson))
+                                                {
+                                                    using var metaDoc = JsonDocument.Parse(job.MetadataJson);
+                                                    if (metaDoc.RootElement.TryGetProperty("ownerName", out var nameEl))
+                                                        ownerName = nameEl.GetString() ?? ownerName;
+                                                    if (metaDoc.RootElement.TryGetProperty("loginUrl", out var loginEl))
+                                                        loginUrl = loginEl.GetString() ?? loginUrl;
+                                                    if (metaDoc.RootElement.TryGetProperty("dashboardUrl", out var dashEl))
+                                                        dashboardUrl = dashEl.GetString() ?? dashboardUrl;
+                                                }
+                                                
+                                                var placeholders = new Dictionary<string, string>
+                                                {
+                                                    { "ownerName", ownerName },
+                                                    { "email", email },
+                                                    { "loginUrl", loginUrl },
+                                                    { "dashboardUrl", dashboardUrl }
+                                                };
+                                                
+                                                var htmlMessage = await _emailTemplateService.RenderTemplateAsync("owner_account_approved", placeholders);
+                                                var subject = await _emailTemplateService.RenderSubjectAsync("owner_account_approved", placeholders);
+                                                
+                                                await _emailService.SendEmailAsync(email, subject, htmlMessage);
+                                                
+                                                _logger.LogInformation("Sent owner approval email to {Email}", email);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                _logger.LogError(ex, "Failed to send owner approval email for job {JobId}", job.Id);
+                                                throw; // Re-throw to mark job as failed
+                                            }
+                                        }
+                                    }
                                     
                                     // Mark job as sent
                                     job.Attempts += 1;
@@ -623,7 +736,7 @@ CREATE INDEX IF NOT EXISTS ""IX_NotificationJobs_ScheduledAt"" ON ""Notification
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogError(ex, "Failed to process reminder job {JobId}", job.Id);
+                            _logger.LogError(ex, "Failed to process template notification job {JobId}", job.Id);
                         }
                     }
                 }
@@ -742,6 +855,24 @@ CREATE INDEX IF NOT EXISTS ""IX_NotificationJobs_ScheduledAt"" ON ""Notification
         // Calculate trip duration in days
         var tripDuration = (int)Math.Ceiling((booking.ReturnDateTime - booking.PickupDateTime).TotalDays);
 
+        // Get owner and inspection information
+        var owner = await _db.Users
+            .Include(u => u.OwnerProfile)
+            .FirstOrDefaultAsync(u => u.Id == booking.OwnerId);
+        
+        var ownerName = owner != null ? $"{owner.FirstName} {owner.LastName}".Trim() : "Vehicle Owner";
+        var ownerPhone = owner?.OwnerProfile?.BusinessPhone ?? owner?.Phone ?? "Contact support";
+        var ownerAddress = owner?.OwnerProfile?.BusinessAddress ?? pickupLocation;
+        var ownerGpsAddress = owner?.OwnerProfile?.GpsAddress ?? "";
+        var pickupInstructions = owner?.OwnerProfile?.PickupInstructions ?? "Contact owner for pickup details";
+
+        // Generate inspection link
+        var inspectionLink = "";
+        if (booking.PickupInspection != null && !string.IsNullOrWhiteSpace(booking.PickupInspection.MagicLinkToken))
+        {
+            inspectionLink = $"https://api.ryverental.com/inspect/{booking.PickupInspection.MagicLinkToken}";
+        }
+
         var placeholders = new Dictionary<string, string>
         {
             { "customer_name", $"{booking.Renter.FirstName} {booking.Renter.LastName}".Trim() },
@@ -760,6 +891,12 @@ CREATE INDEX IF NOT EXISTS ""IX_NotificationJobs_ScheduledAt"" ON ""Notification
             { "rental_amount", booking.RentalAmount.ToString("F2") },
             { "driver_amount", (booking.DriverAmount ?? 0m).ToString("F2") },
             { "total_amount", booking.TotalAmount.ToString("F2") },
+            { "owner_name", ownerName },
+            { "owner_phone", ownerPhone },
+            { "owner_address", ownerAddress },
+            { "owner_gps_address", ownerGpsAddress },
+            { "pickup_instructions", pickupInstructions },
+            { "inspection_link", inspectionLink },
             { "support_email", "support@ryverental.com" }
         };
 

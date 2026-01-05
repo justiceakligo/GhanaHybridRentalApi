@@ -415,7 +415,7 @@ app.MapGet("/health", () => Results.Ok(new
 {
     status = "healthy",
     timestamp = DateTime.UtcNow,
-    version = "1.0.0"
+    version = "1.221"
 }));
 
 // Global error endpoint used by UseExceptionHandler
