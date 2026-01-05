@@ -1016,6 +1016,12 @@ public static class OwnerEndpoints
             user.Id,
             user.Email,
             user.Phone,
+            user.FirstName,
+            user.LastName,
+            user.Role,
+            user.Status,
+            user.PhoneVerified,
+            user.EmailVerified,
             ownerProfile = user.OwnerProfile is null ? null : new
             {
                 user.OwnerProfile.OwnerType,

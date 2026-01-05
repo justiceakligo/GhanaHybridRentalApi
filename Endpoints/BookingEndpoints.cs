@@ -67,6 +67,13 @@ public static class BookingEndpoints
         // Resend booking confirmation email
         app.MapPost("/api/v1/bookings/{bookingId:guid}/email/confirmation", ResendConfirmationEmailAsync)
             .RequireAuthorization();
+
+        // Guest booking management endpoints
+        app.MapPut("/api/v1/bookings/guest/{bookingReference}/contact", UpdateGuestContactAsync)
+            .AllowAnonymous();
+
+        app.MapPut("/api/v1/bookings/{bookingId:guid}/guest-contact", UpdateGuestContactByStaffAsync)
+            .RequireAuthorization();
     }
 
     private static async Task<IResult> GetBookingsAsync(
@@ -912,17 +919,48 @@ public static class BookingEndpoints
             // Don't fail the booking creation if notifications fail
         }
 
+        // Check if guest has previous bookings and provide gentle suggestion
+        string? accountSuggestion = null;
+        if (guestRequest != null)
+        {
+            var hasExistingBookings = false;
+            
+            if (!string.IsNullOrWhiteSpace(guestRequest.GuestEmail))
+            {
+                hasExistingBookings = await db.Bookings
+                    .AnyAsync(b => b.GuestEmail == guestRequest.GuestEmail && b.Id != booking.Id);
+            }
+            else if (!string.IsNullOrWhiteSpace(guestRequest.GuestPhone))
+            {
+                var normalizedPhone = NormalizePhoneNumber(guestRequest.GuestPhone);
+                hasExistingBookings = await db.Bookings
+                    .AnyAsync(b => b.GuestPhone == normalizedPhone && b.Id != booking.Id);
+            }
+            
+            if (hasExistingBookings)
+            {
+                accountSuggestion = "💡 We noticed you've booked with us before! Create an account to track all your bookings and enjoy faster checkout.";
+            }
+        }
+
         // If this was a guest booking and the linked user has no password, tell frontend to prompt for account claim
         if (guestRequest != null && renterUser != null && string.IsNullOrWhiteSpace(renterUser.PasswordHash))
         {
             return Results.Created($"/api/v1/bookings/{booking.Id}", new
             {
                 booking = new BookingResponse(booking),
-                account = new { exists = true, requirePasswordSetup = true, userId = renterUser.Id }
+                account = new { exists = true, requirePasswordSetup = true, userId = renterUser.Id },
+                accountSuggestion = accountSuggestion,
+                manageBookingUrl = $"https://ryverental.info/bookings/{booking.BookingReference}"
             });
         }
 
-        return Results.Created($"/api/v1/bookings/{booking.Id}", new BookingResponse(booking));
+        return Results.Created($"/api/v1/bookings/{booking.Id}", new
+        {
+            booking = new BookingResponse(booking),
+            accountSuggestion = accountSuggestion,
+            manageBookingUrl = $"https://ryverental.info/bookings/{booking.BookingReference}"
+        });
     }
 
     private static async Task<IResult> CalculateBookingTotalAsync(
@@ -1817,4 +1855,148 @@ public static class BookingEndpoints
             );
         }
     }
+
+    private static async Task<IResult> UpdateGuestContactAsync(
+        string bookingReference,
+        [FromBody] UpdateGuestContactRequest request,
+        AppDbContext db,
+        IEmailService emailService)
+    {
+        // Find booking by reference
+        var booking = await db.Bookings
+            .Include(b => b.Renter)
+            .FirstOrDefaultAsync(b => b.BookingReference == bookingReference);
+        
+        if (booking is null)
+            return Results.NotFound(new { error = "Booking not found" });
+        
+        // Only allow updates before pickup or during active rental
+        if (booking.Status != "pending_payment" && booking.Status != "confirmed" && booking.Status != "active")
+            return Results.BadRequest(new { error = "Contact information can only be updated before pickup or during active rental" });
+        
+        var oldEmail = booking.GuestEmail;
+        
+        // Update guest contact info
+        if (!string.IsNullOrWhiteSpace(request.NewEmail))
+            booking.GuestEmail = request.NewEmail;
+        
+        if (!string.IsNullOrWhiteSpace(request.NewPhone))
+            booking.GuestPhone = NormalizePhoneNumber(request.NewPhone);
+        
+        if (!string.IsNullOrWhiteSpace(request.NewFirstName))
+            booking.GuestFirstName = request.NewFirstName;
+            
+        if (!string.IsNullOrWhiteSpace(request.NewLastName))
+            booking.GuestLastName = request.NewLastName;
+        
+        booking.UpdatedAt = DateTime.UtcNow;
+        
+        await db.SaveChangesAsync();
+        
+        // Send confirmation to new email only
+        if (!string.IsNullOrWhiteSpace(booking.GuestEmail))
+        {
+            var message = $@"
+                <h2>Booking Contact Information Updated</h2>
+                <p>Your contact information for booking <strong>{bookingReference}</strong> has been successfully updated.</p>
+                <p><strong>Updated Details:</strong></p>
+                <ul>
+                    <li>Email: {booking.GuestEmail}</li>
+                    <li>Phone: {booking.GuestPhone}</li>
+                    <li>Name: {booking.GuestFirstName} {booking.GuestLastName}</li>
+                </ul>
+                <p>If you did not make this change, please contact us immediately.</p>
+            ";
+            
+            try
+            {
+                await emailService.SendEmailAsync(booking.GuestEmail, "Booking Contact Information Updated", message);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Failed to send contact update confirmation email for booking {Reference}", bookingReference);
+                // Don't fail the update if email fails
+            }
+        }
+        
+        return Results.Ok(new
+        {
+            message = "Contact information updated successfully",
+            booking = new
+            {
+                bookingReference = booking.BookingReference,
+                email = booking.GuestEmail,
+                phone = booking.GuestPhone,
+                firstName = booking.GuestFirstName,
+                lastName = booking.GuestLastName
+            }
+        });
+    }
+
+    private static async Task<IResult> UpdateGuestContactByStaffAsync(
+        Guid bookingId,
+        [FromBody] UpdateGuestContactRequest request,
+        ClaimsPrincipal principal,
+        AppDbContext db)
+    {
+        var userIdStr = principal.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(userIdStr, out var userId))
+            return Results.Unauthorized();
+        
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+        if (user is null)
+            return Results.Unauthorized();
+        
+        // Only owner/admin can update
+        if (user.Role != "owner" && user.Role != "admin")
+            return Results.Forbid();
+        
+        var booking = await db.Bookings
+            .Include(b => b.Vehicle)
+            .FirstOrDefaultAsync(b => b.Id == bookingId);
+            
+        if (booking is null)
+            return Results.NotFound(new { error = "Booking not found" });
+        
+        // Owner can only update their own bookings
+        if (user.Role == "owner" && booking.OwnerId != userId)
+            return Results.Forbid();
+        
+        // Update contact info
+        if (!string.IsNullOrWhiteSpace(request.NewEmail))
+            booking.GuestEmail = request.NewEmail;
+        
+        if (!string.IsNullOrWhiteSpace(request.NewPhone))
+            booking.GuestPhone = NormalizePhoneNumber(request.NewPhone);
+        
+        if (!string.IsNullOrWhiteSpace(request.NewFirstName))
+            booking.GuestFirstName = request.NewFirstName;
+            
+        if (!string.IsNullOrWhiteSpace(request.NewLastName))
+            booking.GuestLastName = request.NewLastName;
+        
+        booking.UpdatedAt = DateTime.UtcNow;
+        
+        await db.SaveChangesAsync();
+        
+        return Results.Ok(new
+        {
+            message = "Guest contact updated successfully",
+            booking = new
+            {
+                bookingReference = booking.BookingReference,
+                email = booking.GuestEmail,
+                phone = booking.GuestPhone,
+                firstName = booking.GuestFirstName,
+                lastName = booking.GuestLastName
+            }
+        });
+    }
 }
+
+public record UpdateGuestContactRequest(
+    string? NewEmail,
+    string? NewPhone,
+    string? NewFirstName,
+    string? NewLastName
+);
