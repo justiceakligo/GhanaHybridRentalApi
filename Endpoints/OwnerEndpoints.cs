@@ -231,7 +231,7 @@ public static class OwnerEndpoints
             return Results.Unauthorized();
 
         var vehicles = await db.Vehicles
-            .Where(v => v.OwnerId == userId)
+            .Where(v => v.OwnerId == userId && v.DeletedAt == null)
             .ToListAsync();
 
         return Results.Ok(new
@@ -406,7 +406,7 @@ public static class OwnerEndpoints
         if (string.IsNullOrWhiteSpace(userIdStr) || !Guid.TryParse(userIdStr, out var userId))
             return Results.Unauthorized();
 
-        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == vehicleId && v.OwnerId == userId);
+        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == vehicleId && v.OwnerId == userId && v.DeletedAt == null);
         if (vehicle is null)
             return Results.NotFound(new { error = "Vehicle not found" });
 
@@ -552,7 +552,7 @@ public static class OwnerEndpoints
         if (string.IsNullOrWhiteSpace(userIdStr) || !Guid.TryParse(userIdStr, out var userId))
             return Results.Unauthorized();
 
-        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == vehicleId && v.OwnerId == userId);
+        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == vehicleId && v.OwnerId == userId && v.DeletedAt == null);
         if (vehicle is null)
             return Results.NotFound(new { error = "Vehicle not found" });
 
@@ -561,11 +561,11 @@ public static class OwnerEndpoints
         if (hasActiveBookings)
             return Results.BadRequest(new { error = "Cannot remove vehicle with active or pending bookings" });
 
-        // Soft-delete by setting status to inactive
-        vehicle.Status = "inactive";
+        // Soft-delete by setting DeletedAt timestamp
+        vehicle.DeletedAt = DateTime.UtcNow;
         await db.SaveChangesAsync();
 
-        return Results.Ok(new { vehicle.Id, vehicle.Status });
+        return Results.Ok(new { message = "Vehicle removed successfully. All booking history preserved.", vehicleId = vehicle.Id, deletedAt = vehicle.DeletedAt });
     }
 
     private static async Task<IResult> ForceDeleteVehicleAsync(
@@ -578,7 +578,7 @@ public static class OwnerEndpoints
         if (string.IsNullOrWhiteSpace(userIdStr) || !Guid.TryParse(userIdStr, out var userId))
             return Results.Unauthorized();
 
-        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == vehicleId && v.OwnerId == userId);
+        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == vehicleId && v.OwnerId == userId); // Allow force delete even if soft-deleted
         if (vehicle is null)
             return Results.NotFound(new { error = "Vehicle not found" });
 
@@ -810,7 +810,7 @@ public static class OwnerEndpoints
         if (string.IsNullOrWhiteSpace(userIdStr) || !Guid.TryParse(userIdStr, out var userId))
             return Results.Unauthorized();
 
-        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == vehicleId && v.OwnerId == userId);
+        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == vehicleId && v.OwnerId == userId && v.DeletedAt == null);
         if (vehicle is null)
             return Results.NotFound(new { error = "Vehicle not found" });
 
@@ -1021,7 +1021,6 @@ public static class OwnerEndpoints
             user.Role,
             user.Status,
             user.PhoneVerified,
-            user.EmailVerified,
             ownerProfile = user.OwnerProfile is null ? null : new
             {
                 user.OwnerProfile.OwnerType,

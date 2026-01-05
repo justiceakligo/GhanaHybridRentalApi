@@ -415,7 +415,7 @@ public static class PromoCodeEndpoints
             return Results.Unauthorized();
 
         // Verify vehicle ownership
-        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == dto.VehicleId && v.OwnerId == userId);
+        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == dto.VehicleId && v.OwnerId == userId && v.DeletedAt == null);
         if (vehicle == null)
             return Results.NotFound(new { error = "Vehicle not found or you don't own this vehicle" });
 
@@ -512,7 +512,7 @@ public static class PromoCodeEndpoints
             return Results.Unauthorized();
 
         // Verify ownership
-        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == vehicleId && v.OwnerId == userId);
+        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == vehicleId && v.OwnerId == userId && v.DeletedAt == null);
         if (vehicle == null)
             return Results.NotFound(new { error = "Vehicle not found" });
 

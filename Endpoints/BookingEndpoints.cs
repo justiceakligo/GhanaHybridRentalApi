@@ -630,7 +630,7 @@ public static class BookingEndpoints
         if (rPickup >= rReturn)
             return Results.BadRequest(new { error = "ReturnDateTime must be after PickupDateTime" });
 
-        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == rVehicleId);
+        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == rVehicleId && v.DeletedAt == null);
         if (vehicle is null || vehicle.Status != "active")
             return Results.BadRequest(new { error = "Vehicle not available" });
 
@@ -985,7 +985,7 @@ public static class BookingEndpoints
 
         var pickupDt = pickup.Value;
         var returnDt = ret.Value;
-        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == vehicleId);
+        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == vehicleId && v.DeletedAt == null);
         if (vehicle is null || vehicle.Status != "active")
             return Results.BadRequest(new { error = "Vehicle not available" });
 

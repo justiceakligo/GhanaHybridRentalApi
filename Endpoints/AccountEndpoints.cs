@@ -59,7 +59,7 @@ public static class AccountEndpoints
         // Delete owner-specific data
         if (string.Equals(user.Role, "owner", StringComparison.OrdinalIgnoreCase))
         {
-            var vehicles = await db.Vehicles.Where(v => v.OwnerId == userId).ToListAsync();
+            var vehicles = await db.Vehicles.Where(v => v.OwnerId == userId && v.DeletedAt == null).ToListAsync();
             db.Vehicles.RemoveRange(vehicles);
 
             var payouts = await db.Payouts.Where(p => p.OwnerId == userId).ToListAsync();

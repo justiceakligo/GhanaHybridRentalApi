@@ -251,7 +251,7 @@ public static class RenterEndpoints
             .Include(v => v.Category)
             .Include(v => v.Owner)
             .Include(v => v.City)
-            .Where(v => v.Status == "active");
+            .Where(v => v.Status == "active" && v.DeletedAt == null);
 
         if (categoryId.HasValue)
             query = query.Where(v => v.CategoryId == categoryId.Value);
@@ -629,7 +629,7 @@ public static class RenterEndpoints
         [FromQuery] DateTime startDate,
         [FromQuery] DateTime endDate)
     {
-        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == vehicleId);
+        var vehicle = await db.Vehicles.FirstOrDefaultAsync(v => v.Id == vehicleId && v.DeletedAt == null);
         if (vehicle is null)
             return Results.NotFound(new { error = "Vehicle not found" });
 

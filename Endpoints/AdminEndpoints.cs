@@ -189,6 +189,12 @@ public static class AdminEndpoints
             .RequireAuthorization("AdminOnly");
         
         // Vehicle management
+        app.MapGet("/api/v1/admin/vehicles/deleted", GetDeletedVehiclesAsync)
+            .RequireAuthorization("AdminOnly");
+        
+        app.MapPost("/api/v1/admin/vehicles/{vehicleId:guid}/restore", RestoreVehicleAsync)
+            .RequireAuthorization("AdminOnly");
+        
         app.MapDelete("/api/v1/admin/vehicles/{vehicleId:guid}", DeleteVehicleAsync)
             .RequireAuthorization("AdminOnly");
         
@@ -512,6 +518,7 @@ public static class AdminEndpoints
             .Include(v => v.Owner)
             .Include(v => v.Category)
             .Include(v => v.City)
+            .Where(v => v.DeletedAt == null) // Exclude soft-deleted vehicles
             .AsQueryable();
 
         // Apply filters if provided
@@ -604,6 +611,107 @@ public static class AdminEndpoints
             total = result.Count(), 
             filters = new { status, ownerId, cityId },
             data = result 
+        });
+    }
+
+    private static async Task<IResult> GetDeletedVehiclesAsync(
+        AppDbContext db,
+        HttpContext httpContext,
+        Guid? ownerId = null)
+    {
+        var query = db.Vehicles
+            .Include(v => v.Owner)
+            .Include(v => v.Category)
+            .Include(v => v.City)
+            .Where(v => v.DeletedAt != null); // Only show deleted vehicles
+
+        if (ownerId.HasValue)
+            query = query.Where(v => v.OwnerId == ownerId.Value);
+
+        var vehicles = await query
+            .OrderByDescending(v => v.DeletedAt)
+            .ToListAsync();
+
+        string? Absolutize(string? u)
+        {
+            if (string.IsNullOrWhiteSpace(u)) return null;
+            return httpContext.Request.AbsolutizeUrl(u);
+        }
+
+        List<string> SafeParsePhotos(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return new List<string>();
+            try { return JsonSerializer.Deserialize<List<string>>(json) ?? new List<string>(); }
+            catch { return new List<string>(); }
+        }
+
+        var result = vehicles.Select(v => new
+        {
+            v.Id,
+            v.PlateNumber,
+            v.Make,
+            v.Model,
+            v.Year,
+            v.Status,
+            v.DeletedAt,
+            deletedDaysAgo = v.DeletedAt.HasValue ? (int)(DateTime.UtcNow - v.DeletedAt.Value).TotalDays : 0,
+            owner = v.Owner is null ? null : new
+            {
+                v.Owner.Id,
+                v.Owner.Email,
+                name = !string.IsNullOrWhiteSpace(v.Owner.FirstName) || !string.IsNullOrWhiteSpace(v.Owner.LastName)
+                    ? $"{v.Owner.FirstName} {v.Owner.LastName}".Trim()
+                    : v.Owner.Email
+            },
+            category = v.Category is null ? null : new { v.Category.Id, v.Category.Name },
+            city = v.City is null ? null : new { v.City.Id, v.City.Name },
+            photos = SafeParsePhotos(v.PhotosJson).Select(p => Absolutize(p)).Take(1).ToList(), // Just first photo for preview
+            bookingCount = db.Bookings.Count(b => b.VehicleId == v.Id)
+        });
+
+        return Results.Ok(new
+        {
+            total = result.Count(),
+            message = result.Any() ? null : "No deleted vehicles found",
+            data = result
+        });
+    }
+
+    private static async Task<IResult> RestoreVehicleAsync(
+        Guid vehicleId,
+        AppDbContext db)
+    {
+        var vehicle = await db.Vehicles
+            .Include(v => v.Owner)
+            .FirstOrDefaultAsync(v => v.Id == vehicleId && v.DeletedAt != null);
+
+        if (vehicle is null)
+            return Results.NotFound(new { error = "Deleted vehicle not found" });
+
+        vehicle.DeletedAt = null;
+        vehicle.Status = "pending_review"; // Reset to pending review after restore
+        await db.SaveChangesAsync();
+
+        return Results.Ok(new
+        {
+            message = "Vehicle restored successfully",
+            vehicle = new
+            {
+                vehicle.Id,
+                vehicle.PlateNumber,
+                vehicle.Make,
+                vehicle.Model,
+                vehicle.Year,
+                vehicle.Status,
+                restoredAt = DateTime.UtcNow,
+                owner = new
+                {
+                    vehicle.Owner!.Id,
+                    vehicle.Owner.Email,
+                    vehicle.Owner.FirstName,
+                    vehicle.Owner.LastName
+                }
+            }
         });
     }
 

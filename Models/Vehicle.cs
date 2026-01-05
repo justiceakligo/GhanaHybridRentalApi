@@ -65,6 +65,9 @@ public class Vehicle
     // Optional per-vehicle daily rate (overrides category default if set)
     public decimal? DailyRate { get; set; }
 
+    // Soft delete timestamp
+    public DateTime? DeletedAt { get; set; }
+
     public User? Owner { get; set; }
     public CarCategory? Category { get; set; }
     public City? City { get; set; }
