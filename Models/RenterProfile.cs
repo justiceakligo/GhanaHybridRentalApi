@@ -41,5 +41,17 @@ public class RenterProfile
     [MaxLength(256)]
     public string? PassportPhotoUrl { get; set; }
 
+    // Address Information
+    [MaxLength(512)]
+    public string? StreetAddress { get; set; }
+    [MaxLength(128)]
+    public string? City { get; set; }
+
+    // Emergency Contact
+    [MaxLength(256)]
+    public string? EmergencyContactName { get; set; }
+    [MaxLength(32)]
+    public string? EmergencyContactPhone { get; set; }
+
     public User? User { get; set; }
 }

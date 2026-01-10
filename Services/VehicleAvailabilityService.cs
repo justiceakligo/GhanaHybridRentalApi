@@ -30,12 +30,16 @@ public class VehicleAvailabilityService : IVehicleAvailabilityService
         if (vehicle.AvailableUntil.HasValue && endDate > vehicle.AvailableUntil.Value)
             return false;
 
+        // Add 4-hour buffer before pickup and after return for cleaning/inspection
+        var startWithBuffer = startDate.AddHours(-4);
+        var endWithBuffer = endDate.AddHours(4);
+
         var query = _db.Bookings
             .Where(b => b.VehicleId == vehicleId &&
                        b.Status != "cancelled" &&
                        b.Status != "completed" &&
-                       b.PickupDateTime < endDate &&
-                       b.ReturnDateTime > startDate);
+                       b.PickupDateTime < endWithBuffer &&
+                       b.ReturnDateTime > startWithBuffer);
 
         if (excludeBookingId.HasValue)
             query = query.Where(b => b.Id != excludeBookingId.Value);
@@ -54,11 +58,15 @@ public class VehicleAvailabilityService : IVehicleAvailabilityService
 
         var allVehicles = await query.Select(v => v.Id).ToListAsync();
 
+        // Add 4-hour buffer for cleaning/inspection between bookings
+        var startWithBuffer = startDate.AddHours(-4);
+        var endWithBuffer = endDate.AddHours(4);
+
         var conflictingBookings = await _db.Bookings
             .Where(b => b.Status != "cancelled" &&
                        b.Status != "completed" &&
-                       b.PickupDateTime < endDate &&
-                       b.ReturnDateTime > startDate)
+                       b.PickupDateTime < endWithBuffer &&
+                       b.ReturnDateTime > startWithBuffer)
             .Select(b => b.VehicleId)
             .Distinct()
             .ToListAsync();

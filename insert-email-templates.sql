@@ -257,7 +257,7 @@ VALUES (
                     <td style="padding: 15px 10px; text-align: right; color: #28a745; font-size: 22px; font-weight: bold;">{{currency}} {{rental_amount}}</td>
                 </tr>
                 <tr>
-                    <td style="padding: 10px; font-size: 13px; color: #666;" colspan="2">Platform fee and payment processing will be deducted as per your agreement</td>
+                    <td style="padding: 10px; font-size: 13px; color: #666;" colspan="2">Service fee and payment processing will be deducted as per your agreement</td>
                 </tr>
             </table>
         </div>

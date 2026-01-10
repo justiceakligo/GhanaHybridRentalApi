@@ -84,6 +84,13 @@ public class Booking
     public Guid? PostTripRecordedBy { get; set; }
     
     public DateTime? ActualPickupDateTime { get; set; }
+    
+    // Agreement signing fields
+    public bool AgreementSigned { get; set; } = false;
+    public DateTime? AgreementSignedAt { get; set; }
+    public string? AgreementSignedBy { get; set; } // Name of person who signed
+    public string? AgreementIpAddress { get; set; }
+    public string? AgreementSignatureData { get; set; } // Base64 signature image or digital acceptance token
 
     // Navigation properties
     public User? Renter { get; set; }

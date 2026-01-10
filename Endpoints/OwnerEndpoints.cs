@@ -55,6 +55,9 @@ public static class OwnerEndpoints
         app.MapGet("/api/v1/owner/bookings", GetOwnerBookingsAsync)
             .RequireAuthorization("OwnerOnly");
 
+        app.MapGet("/api/v1/owner/bookings/{bookingId:guid}", GetOwnerBookingByIdAsync)
+            .RequireAuthorization("OwnerOnly");
+
         app.MapGet("/api/v1/owner/drivers", GetOwnerDriversAsync)
             .RequireAuthorization("OwnerOnly");
 
@@ -756,6 +759,38 @@ public static class OwnerEndpoints
             hasResults = total > 0,
             message = total == 0 ? "No bookings found. Bookings for your vehicles will appear here." : null,
             data = bookings.Select(b => new BookingResponse(b))
+        });
+    }
+
+    private static async Task<IResult> GetOwnerBookingByIdAsync(
+        Guid bookingId,
+        ClaimsPrincipal principal,
+        AppDbContext db)
+    {
+        var userIdStr = principal.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (string.IsNullOrWhiteSpace(userIdStr) || !Guid.TryParse(userIdStr, out var userId))
+            return Results.Unauthorized();
+
+        // Verify owner is active
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+        if (user == null || (user.Role == "owner" && user.Status != "active"))
+            return Results.Json(new { error = "Your owner account is pending verification. Please contact support." }, statusCode: 403);
+
+        var booking = await db.Bookings
+            .Include(b => b.Vehicle).ThenInclude(v => v!.Owner)
+            .Include(b => b.Vehicle).ThenInclude(v => v!.Category)
+            .Include(b => b.Renter).ThenInclude(u => u!.RenterProfile)
+            .Include(b => b.Driver).ThenInclude(d => d!.DriverProfile)
+            .Include(b => b.ProtectionPlan)
+            .FirstOrDefaultAsync(b => b.Id == bookingId && b.OwnerId == userId);
+
+        if (booking == null)
+            return Results.NotFound(new { error = "Booking not found" });
+
+        return Results.Ok(new
+        {
+            success = true,
+            data = new BookingResponse(booking)
         });
     }
 

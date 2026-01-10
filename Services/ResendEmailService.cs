@@ -157,4 +157,57 @@ Ryve Rental Team";
     {
         return SendAsync(email, subject, htmlBody);
     }
+
+    public async Task SendEmailWithAttachmentsAsync(string email, string subject, string htmlBody, List<EmailAttachment> attachments)
+    {
+        var apiKey = await _configService.GetConfigValueAsync("Email:Resend:ApiKey");
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            _logger.LogWarning("Resend API key not configured");
+            throw new InvalidOperationException("Resend API key not configured");
+        }
+
+        var from = await _configService.GetConfigValueAsync("Email:Resend:From")
+                   ?? "Ryve Rental <no-reply@ryverental.info>";
+
+        var replyTo = await _configService.GetConfigValueAsync("Email:ReplyTo") 
+                      ?? "support@ryverental.com";
+
+        // Convert attachments to Resend format (base64 encoded)
+        var resendAttachments = attachments.Select(a => new
+        {
+            filename = a.FileName,
+            content = Convert.ToBase64String(a.Content)
+        }).ToArray();
+
+        var payload = new
+        {
+            from,
+            to = new[] { email },
+            subject,
+            html = htmlBody,
+            reply_to = replyTo,
+            attachments = resendAttachments
+        };
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/emails");
+        req.Headers.Add("Authorization", $"Bearer {apiKey}");
+        req.Content = new StringContent(
+            JsonSerializer.Serialize(payload), 
+            System.Text.Encoding.UTF8, 
+            "application/json");
+
+        _logger.LogInformation("Sending email with {Count} attachments via Resend to {Email}", attachments.Count, email);
+
+        var resp = await _httpClient.SendAsync(req);
+        var respBody = await resp.Content.ReadAsStringAsync();
+
+        if (!resp.IsSuccessStatusCode)
+        {
+            _logger.LogError("Resend send failed: {StatusCode} {Response}", (int)resp.StatusCode, respBody);
+            throw new InvalidOperationException($"Resend send failed: {(int)resp.StatusCode} {respBody}");
+        }
+
+        _logger.LogInformation("Resend email with attachments sent successfully to {Email}. Response: {Response}", email, respBody);
+    }
 }

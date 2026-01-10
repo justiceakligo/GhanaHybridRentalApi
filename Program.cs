@@ -10,9 +10,13 @@ using GhanaHybridRentalApi.Services;
 using GhanaHybridRentalApi.Endpoints;
 using Microsoft.AspNetCore.Diagnostics; // added to support UseExceptionHandler mapping
 using Microsoft.AspNetCore.HttpOverrides; // Respect X-Forwarded-* headers (proxies)
+using QuestPDF.Infrastructure;
 
 // Enable legacy timestamp behavior for Npgsql to handle DateTime properly with PostgreSQL
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
+
+// Configure QuestPDF license (Community License for non-commercial or open-source use)
+QuestPDF.Settings.License = LicenseType.Community;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -80,10 +84,12 @@ else
 
 builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddScoped<IEmailTemplateService, EmailTemplateService>();
+builder.Services.AddScoped<IReceiptTemplateService, ReceiptTemplateService>();
 builder.Services.AddScoped<IMarketingEmailService, MarketingEmailService>();
 builder.Services.AddScoped<IPromoCodeService, PromoCodeService>();
 builder.Services.AddHostedService<NotificationJobProcessor>();
 builder.Services.AddHostedService<DepositRefundNotificationService>();
+builder.Services.AddHostedService<UnpaidBookingCancellationService>();
 
 // Payment services configuration
 // Payment services: always register real providers. Configuration (keys, enabled flags) are read at runtime via IAppConfigService.
@@ -401,6 +407,7 @@ app.MapMarketingEmailEndpoints();
 app.MapWebhookEndpoints();
 app.MapFileUploadEndpoints();
 app.MapReceiptEndpoints();
+app.MapReceiptTemplateEndpoints();
 app.MapAccountEndpoints();
 app.MapAirportEndpoints();
 app.MapRentalAgreementEndpoints();
@@ -409,13 +416,14 @@ app.MapPartnerEndpoints();
 app.MapDepositRefundEndpoints();
 app.MapOwnerPayoutEndpoints();
 app.MapPromoCodeEndpoints();
+app.MapSettingsEndpoints();
 
 // Health check endpoint
 app.MapGet("/health", () => Results.Ok(new
 {
     status = "healthy",
     timestamp = DateTime.UtcNow,
-    version = "1.223"
+    version = "1.227"
 }));
 
 // Global error endpoint used by UseExceptionHandler

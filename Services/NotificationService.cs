@@ -36,6 +36,7 @@ public class NotificationService : INotificationService
     private readonly IWhatsAppSender _whatsAppSender;
     private readonly IEmailService _emailService;
     private readonly IEmailTemplateService _emailTemplateService;
+    private readonly IReceiptTemplateService _receiptTemplateService;
     private readonly ILogger<NotificationService> _logger;
     private readonly AppDbContext _db;
 
@@ -43,12 +44,14 @@ public class NotificationService : INotificationService
         IWhatsAppSender whatsAppSender,
         IEmailService emailService,
         IEmailTemplateService emailTemplateService,
+        IReceiptTemplateService receiptTemplateService,
         ILogger<NotificationService> logger,
         AppDbContext db)
     {
         _whatsAppSender = whatsAppSender;
         _emailService = emailService;
         _emailTemplateService = emailTemplateService;
+        _receiptTemplateService = receiptTemplateService;
         _logger = logger;
         _db = db;
     }
@@ -168,9 +171,15 @@ public class NotificationService : INotificationService
             { "currency", booking.Currency },
             { "rental_amount", booking.RentalAmount.ToString("F2") },
             { "driver_amount", (booking.DriverAmount ?? 0m).ToString("F2") },
+            { "protection_amount", (booking.ProtectionAmount ?? 0m).ToString("F2") },
+            { "platform_fee", (booking.PlatformFee ?? 0m).ToString("F2") },
+            { "deposit_amount", booking.DepositAmount.ToString("F2") },
+            { "promo_discount", (booking.PromoDiscountAmount ?? 0m).ToString("F2") },
+            { "promo_display", (booking.PromoDiscountAmount.HasValue && booking.PromoDiscountAmount.Value > 0) ? "table-row" : "none" },
             { "total_amount", booking.TotalAmount.ToString("F2") },
             { "qr_link", pickupUrl },
             { "qr_code_image", qrCodeImage },
+            { "qr_code", qrCodeImage },
             { "owner_name", ownerName },
             { "owner_phone", ownerPhone },
             { "owner_address", ownerAddress },
@@ -378,7 +387,9 @@ Duration: {(booking.ReturnDateTime.Date - booking.PickupDateTime.Date).Days} day
             { "currency", booking.Currency },
             { "rental_amount", booking.RentalAmount.ToString("F2") },
             { "driver_amount", (booking.DriverAmount ?? 0).ToString("F2") },
+            { "platform_fee", (booking.PlatformFee ?? 0).ToString("F2") },
             { "owner_total", (booking.RentalAmount + (booking.DriverAmount ?? 0)).ToString("F2") },
+            { "owner_net_earnings", ((booking.RentalAmount + (booking.DriverAmount ?? 0)) - (booking.PlatformFee ?? 0)).ToString("F2") },
             { "support_email", "support@ryverental.com" }
         };
 
@@ -601,8 +612,64 @@ CREATE INDEX IF NOT EXISTS ""IX_NotificationJobs_ScheduledAt"" ON ""Notification
                     booking = await _db.Bookings.Include(b => b.Renter).Include(b => b.Vehicle).FirstOrDefaultAsync(b => b.Id == job.BookingId.Value);
                 }
                 
-                // Handle special notification types with templates
-                if (job.TemplateName == "pickup_reminder" || job.TemplateName == "return_reminder" || job.TemplateName == "deposit_refund_processed" || job.TemplateName == "owner_account_approved")
+                // Handle owner account approval (doesn't require booking)
+                if (job.TemplateName == "owner_account_approved")
+                {
+                    if (!string.IsNullOrWhiteSpace(job.TargetEmail))
+                    {
+                        try
+                        {
+                            var ownerName = "Owner";
+                            var email = job.TargetEmail;
+                            var loginUrl = "https://ryverental.info/login";
+                            var dashboardUrl = "https://ryverental.info/owner/dashboard";
+                            
+                            // Parse metadata if available
+                            if (!string.IsNullOrWhiteSpace(job.MetadataJson))
+                            {
+                                using var metaDoc = JsonDocument.Parse(job.MetadataJson);
+                                if (metaDoc.RootElement.TryGetProperty("ownerName", out var nameEl))
+                                    ownerName = nameEl.GetString() ?? ownerName;
+                                if (metaDoc.RootElement.TryGetProperty("loginUrl", out var loginEl))
+                                    loginUrl = loginEl.GetString() ?? loginUrl;
+                                if (metaDoc.RootElement.TryGetProperty("dashboardUrl", out var dashEl))
+                                    dashboardUrl = dashEl.GetString() ?? dashboardUrl;
+                            }
+                            
+                            var placeholders = new Dictionary<string, string>
+                            {
+                                { "ownerName", ownerName },
+                                { "email", email },
+                                { "loginUrl", loginUrl },
+                                { "dashboardUrl", dashboardUrl }
+                            };
+                            
+                            var htmlMessage = await _emailTemplateService.RenderTemplateAsync("owner_account_approved", placeholders);
+                            var subject = await _emailTemplateService.RenderSubjectAsync("owner_account_approved", placeholders);
+                            
+                            await _emailService.SendEmailAsync(email, subject, htmlMessage);
+                            
+                            _logger.LogInformation("Sent owner approval email to {Email}", email);
+                            
+                            // Mark job as sent
+                            job.Attempts += 1;
+                            job.LastAttemptAt = DateTime.UtcNow;
+                            job.Status = "sent";
+                            job.UpdatedAt = DateTime.UtcNow;
+                            await _db.SaveChangesAsync();
+                            processed++;
+                            continue; // Skip to next job
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Failed to send owner approval email for job {JobId}", job.Id);
+                            // Don't re-throw, let it fall through to mark as failed below
+                        }
+                    }
+                }
+                
+                // Handle booking-related notification types with templates
+                if (job.TemplateName == "pickup_reminder" || job.TemplateName == "return_reminder" || job.TemplateName == "deposit_refund_processed")
                 {
                     // Extract booking ID from metadata
                     if (!string.IsNullOrWhiteSpace(job.MetadataJson))
@@ -676,52 +743,6 @@ CREATE INDEX IF NOT EXISTS ""IX_NotificationJobs_ScheduledAt"" ON ""Notification
                                             }
                                         }
                                     }
-                                    else if (job.TemplateName == "owner_account_approved")
-                                    {
-                                        // Send owner account approval notification
-                                        if (!string.IsNullOrWhiteSpace(job.TargetEmail))
-                                        {
-                                            try
-                                            {
-                                                var ownerName = "Owner";
-                                                var email = job.TargetEmail;
-                                                var loginUrl = "https://ryverental.info/login";
-                                                var dashboardUrl = "https://ryverental.info/owner/dashboard";
-                                                
-                                                // Parse metadata if available
-                                                if (!string.IsNullOrWhiteSpace(job.MetadataJson))
-                                                {
-                                                    using var metaDoc = JsonDocument.Parse(job.MetadataJson);
-                                                    if (metaDoc.RootElement.TryGetProperty("ownerName", out var nameEl))
-                                                        ownerName = nameEl.GetString() ?? ownerName;
-                                                    if (metaDoc.RootElement.TryGetProperty("loginUrl", out var loginEl))
-                                                        loginUrl = loginEl.GetString() ?? loginUrl;
-                                                    if (metaDoc.RootElement.TryGetProperty("dashboardUrl", out var dashEl))
-                                                        dashboardUrl = dashEl.GetString() ?? dashboardUrl;
-                                                }
-                                                
-                                                var placeholders = new Dictionary<string, string>
-                                                {
-                                                    { "ownerName", ownerName },
-                                                    { "email", email },
-                                                    { "loginUrl", loginUrl },
-                                                    { "dashboardUrl", dashboardUrl }
-                                                };
-                                                
-                                                var htmlMessage = await _emailTemplateService.RenderTemplateAsync("owner_account_approved", placeholders);
-                                                var subject = await _emailTemplateService.RenderSubjectAsync("owner_account_approved", placeholders);
-                                                
-                                                await _emailService.SendEmailAsync(email, subject, htmlMessage);
-                                                
-                                                _logger.LogInformation("Sent owner approval email to {Email}", email);
-                                            }
-                                            catch (Exception ex)
-                                            {
-                                                _logger.LogError(ex, "Failed to send owner approval email for job {JobId}", job.Id);
-                                                throw; // Re-throw to mark job as failed
-                                            }
-                                        }
-                                    }
                                     
                                     // Mark job as sent
                                     job.Attempts += 1;
@@ -767,7 +788,7 @@ CREATE INDEX IF NOT EXISTS ""IX_NotificationJobs_ScheduledAt"" ON ""Notification
                                 var email = user?.Email ?? job.TargetEmail ?? (booking?.Renter?.Email ?? booking?.GuestEmail);
                                 if (!string.IsNullOrWhiteSpace(email))
                                 {
-                                    await _emailService.SendBookingConfirmationAsync(email, job.Message ?? job.Subject ?? string.Empty);
+                                    await _emailService.SendEmailAsync(email, job.Subject ?? "Notification", job.Message ?? string.Empty);
                                     successAny = true;
                                 }
                                 break;
@@ -873,6 +894,24 @@ CREATE INDEX IF NOT EXISTS ""IX_NotificationJobs_ScheduledAt"" ON ""Notification
             inspectionLink = $"https://api.ryverental.com/inspect/{booking.PickupInspection.MagicLinkToken}";
         }
 
+        // Generate QR code for booking inspection
+        var qrCodeBase64 = "";
+        if (!string.IsNullOrWhiteSpace(inspectionLink))
+        {
+            try
+            {
+                using var qrGenerator = new QRCoder.QRCodeGenerator();
+                using var qrCodeData = qrGenerator.CreateQrCode(inspectionLink, QRCoder.QRCodeGenerator.ECCLevel.Q);
+                using var qrCode = new QRCoder.PngByteQRCode(qrCodeData);
+                var qrCodeBytes = qrCode.GetGraphic(20);
+                qrCodeBase64 = $"data:image/png;base64,{Convert.ToBase64String(qrCodeBytes)}";
+            }
+            catch (Exception qrEx)
+            {
+                _logger.LogWarning(qrEx, "Failed to generate QR code for booking {BookingRef}", booking.BookingReference);
+            }
+        }
+
         var placeholders = new Dictionary<string, string>
         {
             { "customer_name", $"{booking.Renter.FirstName} {booking.Renter.LastName}".Trim() },
@@ -890,6 +929,11 @@ CREATE INDEX IF NOT EXISTS ""IX_NotificationJobs_ScheduledAt"" ON ""Notification
             { "currency", booking.Currency },
             { "rental_amount", booking.RentalAmount.ToString("F2") },
             { "driver_amount", (booking.DriverAmount ?? 0m).ToString("F2") },
+            { "protection_amount", (booking.ProtectionAmount ?? 0m).ToString("F2") },
+            { "platform_fee", (booking.PlatformFee ?? 0m).ToString("F2") },
+            { "deposit_amount", booking.DepositAmount.ToString("F2") },
+            { "promo_discount", (booking.PromoDiscountAmount ?? 0m).ToString("F2") },
+            { "promo_display", (booking.PromoDiscountAmount.HasValue && booking.PromoDiscountAmount.Value > 0) ? "table-row" : "none" },
             { "total_amount", booking.TotalAmount.ToString("F2") },
             { "owner_name", ownerName },
             { "owner_phone", ownerPhone },
@@ -897,6 +941,7 @@ CREATE INDEX IF NOT EXISTS ""IX_NotificationJobs_ScheduledAt"" ON ""Notification
             { "owner_gps_address", ownerGpsAddress },
             { "pickup_instructions", pickupInstructions },
             { "inspection_link", inspectionLink },
+            { "qr_code", qrCodeBase64 },
             { "support_email", "support@ryverental.com" }
         };
 
@@ -925,7 +970,38 @@ Get ready for your trip!";
 
             if (!string.IsNullOrEmpty(booking.Renter.Email))
             {
-                await _emailService.SendEmailAsync(booking.Renter.Email, subject, htmlMessage);
+                var attachments = new List<EmailAttachment>();
+                
+                // Get signed rental agreement if exists
+                var rentalAgreement = await _db.RentalAgreementAcceptances
+                    .FirstOrDefaultAsync(a => a.BookingId == booking.Id && a.RenterId == booking.RenterId);
+
+                if (rentalAgreement != null)
+                {
+                    // Generate rental agreement PDF attachment using QuestPDF
+                    var agreementBytes = await _receiptTemplateService.GenerateRentalAgreementPdfAsync(booking, rentalAgreement);
+                    attachments.Add(new EmailAttachment($"rental-agreement-{booking.BookingReference}.pdf", agreementBytes, "application/pdf"));
+                }
+                
+                // Always attach receipt PDF
+                try
+                {
+                    var receiptBytes = await _receiptTemplateService.GenerateReceiptPdfAsync(booking);
+                    attachments.Add(new EmailAttachment($"receipt-{booking.BookingReference}.pdf", receiptBytes, "application/pdf"));
+                }
+                catch (Exception receiptEx)
+                {
+                    _logger.LogWarning(receiptEx, "Failed to generate receipt PDF for booking {BookingRef}", booking.BookingReference);
+                }
+                
+                if (attachments.Count > 0)
+                {
+                    await _emailService.SendEmailWithAttachmentsAsync(booking.Renter.Email, subject, htmlMessage, attachments);
+                }
+                else
+                {
+                    await _emailService.SendEmailAsync(booking.Renter.Email, subject, htmlMessage);
+                }
             }
         }
         catch (Exception ex)
@@ -933,6 +1009,66 @@ Get ready for your trip!";
             _logger.LogError(ex, "Failed to send booking confirmed notification using template for booking {BookingRef}", booking.BookingReference);
             throw;
         }
+    }
+
+    private string GenerateRentalAgreementDocument(Booking booking, RentalAgreementAcceptance acceptance)
+    {
+        var sb = new System.Text.StringBuilder();
+        
+        sb.AppendLine("═══════════════════════════════════════════════");
+        sb.AppendLine("                VEHICLE RENTAL AGREEMENT");
+        sb.AppendLine("                     RYVEPOOL");
+        sb.AppendLine("═══════════════════════════════════════════════");
+        sb.AppendLine();
+        sb.AppendLine($"Agreement Date: {acceptance.AcceptedAt:yyyy-MM-dd HH:mm} UTC");
+        sb.AppendLine($"Booking Reference: {booking.BookingReference}");
+        sb.AppendLine($"Template Version: {acceptance.TemplateCode} v{acceptance.TemplateVersion}");
+        sb.AppendLine();
+        sb.AppendLine("───────────────────────────────────────────────");
+        sb.AppendLine("RENTER INFORMATION");
+        sb.AppendLine("───────────────────────────────────────────────");
+        sb.AppendLine($"Name: {booking.Renter?.FirstName} {booking.Renter?.LastName}");
+        sb.AppendLine($"Email: {booking.Renter?.Email}");
+        sb.AppendLine($"Phone: {booking.Renter?.Phone}");
+        sb.AppendLine();
+        sb.AppendLine("───────────────────────────────────────────────");
+        sb.AppendLine("VEHICLE INFORMATION");
+        sb.AppendLine("───────────────────────────────────────────────");
+        sb.AppendLine($"Vehicle: {booking.Vehicle?.Make} {booking.Vehicle?.Model} {booking.Vehicle?.Year}");
+        sb.AppendLine($"Plate Number: {booking.Vehicle?.PlateNumber}");
+        sb.AppendLine();
+        sb.AppendLine("───────────────────────────────────────────────");
+        sb.AppendLine("RENTAL PERIOD");
+        sb.AppendLine("───────────────────────────────────────────────");
+        sb.AppendLine($"Pickup: {booking.PickupDateTime:yyyy-MM-dd HH:mm}");
+        sb.AppendLine($"Return: {booking.ReturnDateTime:yyyy-MM-dd HH:mm}");
+        sb.AppendLine();
+        sb.AppendLine("───────────────────────────────────────────────");
+        sb.AppendLine("AGREEMENT TERMS");
+        sb.AppendLine("───────────────────────────────────────────────");
+        sb.AppendLine();
+        sb.AppendLine(acceptance.AgreementSnapshot ?? "[Agreement content]");
+        sb.AppendLine();
+        sb.AppendLine("───────────────────────────────────────────────");
+        sb.AppendLine("ACCEPTANCE CONFIRMATIONS");
+        sb.AppendLine("───────────────────────────────────────────────");
+        sb.AppendLine($"✓ No Smoking Policy: {(acceptance.AcceptedNoSmoking ? "ACCEPTED" : "NOT ACCEPTED")}");
+        sb.AppendLine($"✓ Fines & Tickets Responsibility: {(acceptance.AcceptedFinesAndTickets ? "ACCEPTED" : "NOT ACCEPTED")}");
+        sb.AppendLine($"✓ Accident Procedure: {(acceptance.AcceptedAccidentProcedure ? "ACCEPTED" : "NOT ACCEPTED")}");
+        sb.AppendLine();
+        sb.AppendLine("───────────────────────────────────────────────");
+        sb.AppendLine("DIGITAL SIGNATURE");
+        sb.AppendLine("───────────────────────────────────────────────");
+        sb.AppendLine($"Signed By: {booking.Renter?.FirstName} {booking.Renter?.LastName}");
+        sb.AppendLine($"Date & Time: {acceptance.AcceptedAt:yyyy-MM-dd HH:mm:ss} UTC");
+        sb.AppendLine($"IP Address: {acceptance.IpAddress}");
+        sb.AppendLine();
+        sb.AppendLine("═══════════════════════════════════════════════");
+        sb.AppendLine("This is a legally binding digital agreement.");
+        sb.AppendLine("Acceptance was recorded electronically with audit trail.");
+        sb.AppendLine("═══════════════════════════════════════════════");
+        
+        return sb.ToString();
     }
 
     public async Task SendPaymentReceivedNotificationAsync(Booking booking, decimal amount)
@@ -1245,10 +1381,8 @@ Check your dashboard for details.";
     {
         try
         {
-            // Create QR code data - combine booking reference and pickup URL
-            var qrData = !string.IsNullOrEmpty(pickupUrl) 
-                ? $"{bookingReference}|{pickupUrl}" 
-                : bookingReference;
+            // Create QR code data - deep link to owner dashboard
+            var qrData = $"https://dashboard.ryverental.com/bookings/{bookingReference}";
 
             using var qrGenerator = new QRCodeGenerator();
             using var qrCodeData = qrGenerator.CreateQrCode(qrData, QRCodeGenerator.ECCLevel.Q);
@@ -1406,7 +1540,24 @@ Check your dashboard for details.";
 
                 var htmlMessage = await _emailTemplateService.RenderTemplateAsync("booking_completed_customer", placeholders);
                 var subject = await _emailTemplateService.RenderSubjectAsync("booking_completed_customer", placeholders);
-                await _emailService.SendEmailAsync(booking.Renter.Email, subject, htmlMessage);
+                
+                // Generate and attach receipt PDF
+                try
+                {
+                    var receiptBytes = await _receiptTemplateService.GenerateReceiptPdfAsync(booking);
+                    
+                    var attachments = new List<EmailAttachment>
+                    {
+                        new EmailAttachment($"receipt-{booking.BookingReference}.pdf", receiptBytes, "application/pdf")
+                    };
+                    
+                    await _emailService.SendEmailWithAttachmentsAsync(booking.Renter.Email, subject, htmlMessage, attachments);
+                }
+                catch (Exception receiptEx)
+                {
+                    _logger.LogError(receiptEx, "Failed to generate receipt attachment for booking {BookingRef}, sending email without attachment", booking.BookingReference);
+                    await _emailService.SendEmailAsync(booking.Renter.Email, subject, htmlMessage);
+                }
 
                 // Send WhatsApp notification
                 if (!string.IsNullOrWhiteSpace(booking.Renter.Phone))
@@ -1441,6 +1592,28 @@ Questions? Contact support@ryverental.com";
                     ? $"{booking.Renter.FirstName} {booking.Renter.LastName}".Trim() 
                     : booking.GuestFirstName + " " + booking.GuestLastName;
 
+                // Calculate mileage charges from booking charges
+                var mileageCharges = await _db.BookingCharges
+                    .Include(bc => bc.ChargeType)
+                    .Where(bc => bc.BookingId == booking.Id && 
+                                bc.ChargeType != null && 
+                                bc.ChargeType.Code == "mileage_overage" &&
+                                bc.Status == "approved")
+                    .ToListAsync();
+                
+                var mileageEarnings = mileageCharges.Sum(mc => mc.Amount);
+                
+                // Calculate base rental (excluding mileage)
+                var baseRental = booking.RentalAmount - mileageEarnings;
+                
+                // Driver earnings (if owner provides driver service)
+                var driverEarnings = booking.DriverAmount ?? 0m;
+                
+                // Calculate owner's net payment (rental + mileage + driver - service fee)
+                var totalEarnings = booking.RentalAmount + driverEarnings; // rental includes base + mileage
+                var platformFee = booking.PlatformFee ?? 0m;
+                var ownerNetPayment = totalEarnings - platformFee;
+
                 var placeholders = new Dictionary<string, string>
                 {
                     { "owner_name", ownerName },
@@ -1452,7 +1625,15 @@ Questions? Contact support@ryverental.com";
                     { "trip_duration", tripDuration.ToString() },
                     { "distance_traveled", distanceTraveled.ToString() },
                     { "currency", booking.Currency },
+                    { "base_rental", baseRental.ToString("F2") },
+                    { "mileage_earnings", mileageEarnings.ToString("F2") },
+                    { "driver_earnings", driverEarnings.ToString("F2") },
                     { "rental_amount", booking.RentalAmount.ToString("F2") },
+                    { "total_earnings", totalEarnings.ToString("F2") },
+                    { "platform_fee", platformFee.ToString("F2") },
+                    { "owner_net_payment", ownerNetPayment.ToString("F2") },
+                    { "mileage_display", mileageEarnings > 0 ? "table-row" : "none" },
+                    { "driver_display", driverEarnings > 0 ? "table-row" : "none" },
                     { "support_email", "support@ryverental.com" }
                 };
 
@@ -1475,7 +1656,7 @@ Vehicle: {booking.Vehicle?.Make} {booking.Vehicle?.Model}
 Duration: {tripDuration} days
 Distance: {distanceTraveled} km
 
-💰 Your Earnings: {booking.Currency} {booking.RentalAmount:F2}
+💰 Your Earnings: {booking.Currency} {ownerNetPayment:F2} (after service fee)
 
 Payout will be processed according to your payment schedule.
 

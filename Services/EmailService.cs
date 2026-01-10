@@ -10,7 +10,10 @@ public interface IEmailService
     Task SendPayoutNotificationAsync(string email, decimal amount);
     Task SendPasswordResetEmailAsync(string email, string resetLink);
     Task SendEmailAsync(string email, string subject, string htmlBody);
+    Task SendEmailWithAttachmentsAsync(string email, string subject, string htmlBody, List<EmailAttachment> attachments);
 }
+
+public record EmailAttachment(string FileName, byte[] Content, string ContentType);
 
 public class FakeEmailService : IEmailService
 {
@@ -56,7 +59,11 @@ public class FakeEmailService : IEmailService
         _logger.LogInformation("FAKE EMAIL: To {Email}, Subject: {Subject}", email, subject);
         return Task.CompletedTask;
     }
-}
+    public Task SendEmailWithAttachmentsAsync(string email, string subject, string htmlMessage, List<EmailAttachment> attachments)
+    {
+        _logger.LogInformation("FAKE EMAIL: To {Email}, Subject: {Subject}, Attachments: {Count}", email, subject, attachments.Count);
+        return Task.CompletedTask;
+    }}
 
 public class SmtpEmailService : IEmailService
 {
@@ -191,7 +198,11 @@ public class SmtpEmailService : IEmailService
             throw;
         }
     }
-
+    public async Task SendEmailWithAttachmentsAsync(string email, string subject, string htmlMessage, List<EmailAttachment> attachments)
+    {
+        _logger.LogWarning("SMTP does not support attachments. Sending email without attachments to {Email}", email);
+        await SendEmailAsync(email, subject, htmlMessage);
+    }
     public async Task SendVerificationEmailAsync(string email, string verificationLink)
     {
         var subject = "Verify Your Email - Ryve Rental";
@@ -440,6 +451,12 @@ The Ryve Rental Team";
 
         await SendEmailAsync(email, subject, body);
     }
+
+    public async Task SendEmailWithAttachmentsAsync(string email, string subject, string htmlMessage, List<EmailAttachment> attachments)
+    {
+        _logger.LogWarning("Azure Email Service does not support attachments. Sending email without attachments to {Email}", email);
+        await SendEmailAsync(email, subject, htmlMessage);
+    }
 }
 
 public class PostmarkEmailService : IEmailService
@@ -519,6 +536,12 @@ public class PostmarkEmailService : IEmailService
 
     public Task SendEmailAsync(string email, string subject, string htmlBody) =>
         SendEmailUsingPostmarkAsync(email, subject, htmlBody);
+
+    public async Task SendEmailWithAttachmentsAsync(string email, string subject, string htmlMessage, List<EmailAttachment> attachments)
+    {
+        _logger.LogWarning("Postmark does not support attachments in this implementation. Sending email without attachments to {Email}", email);
+        await SendEmailAsync(email, subject, htmlMessage);
+    }
 }
 
 // Composite Email Service - tries Postmark first, then Azure, falls back to SMTP
@@ -693,4 +716,25 @@ public class CompositeEmailService : IEmailService
 
     public Task SendEmailAsync(string email, string subject, string htmlBody) =>
         SendWithFallbackOrderAsync(s => s.SendEmailAsync(email, subject, htmlBody), email, "custom email");
+
+    public async Task SendEmailWithAttachmentsAsync(string email, string subject, string htmlMessage, List<EmailAttachment> attachments)
+    {
+        // Try Resend service for attachments if available
+        if (_resendService != null)
+        {
+            try
+            {
+                await _resendService.SendEmailWithAttachmentsAsync(email, subject, htmlMessage, attachments);
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to send email with attachments via Resend. Falling back to email without attachments.");
+            }
+        }
+        
+        // Fallback: send without attachments
+        _logger.LogWarning("Sending email without attachments to {Email} (Resend not available or failed)", email);
+        await SendEmailAsync(email, subject, htmlMessage);
+    }
 }

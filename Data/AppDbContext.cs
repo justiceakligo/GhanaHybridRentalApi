@@ -59,6 +59,9 @@ public class AppDbContext : DbContext
     // Email templates
     public DbSet<EmailTemplate> EmailTemplates => Set<EmailTemplate>();
 
+    // Receipt templates
+    public DbSet<ReceiptTemplate> ReceiptTemplates => Set<ReceiptTemplate>();
+
     // Promo codes and referrals
     public DbSet<PromoCode> PromoCodes => Set<PromoCode>();
     public DbSet<PromoCodeUsage> PromoCodeUsage => Set<PromoCodeUsage>();

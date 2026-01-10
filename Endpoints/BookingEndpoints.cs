@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text;
 using System.Text.Json;
 using GhanaHybridRentalApi.Data;
 using GhanaHybridRentalApi.Dtos;
@@ -74,6 +75,18 @@ public static class BookingEndpoints
 
         app.MapPut("/api/v1/bookings/{bookingId:guid}/guest-contact", UpdateGuestContactByStaffAsync)
             .RequireAuthorization();
+
+        // Retrieve booking by reference (for unpaid bookings)
+        app.MapGet("/api/v1/bookings/reference/{bookingReference}", GetBookingByReferenceAsync)
+            .AllowAnonymous();
+
+        // Sign rental agreement
+        app.MapPost("/api/v1/bookings/{bookingId:guid}/sign-agreement", SignAgreementAsync)
+            .AllowAnonymous();
+
+        // Initiate payment for existing booking
+        app.MapPost("/api/v1/bookings/{bookingId:guid}/initiate-payment", InitiatePaymentAsync)
+            .AllowAnonymous();
     }
 
     private static async Task<IResult> GetBookingsAsync(
@@ -537,7 +550,8 @@ public static class BookingEndpoints
                     LastName = guestRequest.GuestLastName,
                     Role = "renter",
                     Status = "pending",
-                    PhoneVerified = false
+                    PhoneVerified = false,
+                    CreatedAt = DateTime.UtcNow
                 };
 
                 db.Users.Add(renterUser);
@@ -634,6 +648,29 @@ public static class BookingEndpoints
         if (vehicle is null || vehicle.Status != "active")
             return Results.BadRequest(new { error = "Vehicle not available" });
 
+        // CRITICAL: Check vehicle availability to prevent double booking
+        // Add 4-hour buffer after each booking for cleaning/inspection/turnaround
+        var pickupWithBuffer = rPickup.AddHours(-4);
+        var returnWithBuffer = rReturn.AddHours(4);
+        
+        var hasConflictingBooking = await db.Bookings
+            .Where(b => b.VehicleId == rVehicleId &&
+                       b.Status != "cancelled" &&
+                       b.Status != "completed" &&
+                       b.PickupDateTime < returnWithBuffer &&
+                       b.ReturnDateTime > pickupWithBuffer)
+            .AnyAsync();
+
+        if (hasConflictingBooking)
+        {
+            return Results.BadRequest(new 
+            { 
+                error = "Vehicle not available for selected dates",
+                message = "This vehicle is already booked for the dates you selected or needs a 4-hour buffer for cleaning and inspection. Please choose different dates or another vehicle.",
+                code = "VEHICLE_ALREADY_BOOKED"
+            });
+        }
+
         var category = vehicle.CategoryId.HasValue
             ? await db.CarCategories.FirstOrDefaultAsync(c => c.Id == vehicle.CategoryId.Value)
             : null;
@@ -641,8 +678,9 @@ public static class BookingEndpoints
         if (category is null)
             return Results.BadRequest(new { error = "Vehicle category not configured" });
 
-        var totalDays = (rReturn.Date - rPickup.Date).TotalDays;
-        if (totalDays < 1) totalDays = 1;
+        // Calculate rental days: exact time difference, rounded up (matches frontend Math.ceil)
+        var totalDays = (int)Math.Ceiling((rReturn - rPickup).TotalDays);
+        if (totalDays < 1) totalDays = 1; // Safeguard: minimum 1 day
 
         var dailyRate = vehicle.DailyRate ?? category.DefaultDailyRate;
         var rentalAmount = dailyRate * (decimal)totalDays;
@@ -725,11 +763,17 @@ public static class BookingEndpoints
             protectionAmount = Math.Max(protectionPlan.MinFee, Math.Min(protectionAmount.Value, protectionPlan.MaxFee));
         }
 
-        // Get platform fee percentage from database config (default 5%)
-        var platformFeePercentage = await configService.GetConfigValueAsync<decimal>("Booking:PlatformFeePercentage", 5.0m);
+        // Get platform fee percentage from GlobalSettings (default 15%)
+        decimal platformFeePercentage = 15.0m;
+        var platformFeeSetting = await db.GlobalSettings
+            .FirstOrDefaultAsync(s => s.Key == "PlatformFeePercentage");
+        if (platformFeeSetting != null)
+        {
+            try { platformFeePercentage = JsonSerializer.Deserialize<decimal>(platformFeeSetting.ValueJson); } catch { }
+        }
         
-        // Calculate platform fee
-        var subtotal = rentalAmount + (driverAmount ?? 0m) + (insuranceAmount ?? 0m) + (protectionAmount ?? 0m);
+        // Calculate platform fee (only on rental amount + driver amount, not protection/insurance)
+        var subtotal = rentalAmount + (driverAmount ?? 0m);
         var platformFee = subtotal * (platformFeePercentage / 100m);
 
         var totalAmount = rentalAmount + depositAmount + (driverAmount ?? 0m) + (insuranceAmount ?? 0m) + (protectionAmount ?? 0m) + platformFee;
@@ -996,9 +1040,11 @@ public static class BookingEndpoints
         if (category is null)
             return Results.BadRequest(new { error = "Vehicle category not configured" });
 
-        // Use resolved pickup/return values (supports both pickupDateTime/returnDateTime and startDate/endDate)
-        var totalDays = (returnDt.Date - pickupDt.Date).TotalDays;
-        if (totalDays < 1) totalDays = 1;
+        // Calculate rental days: exact time difference, rounded up (matches frontend Math.ceil)
+        // Example: Jan 7 5am to Jan 8 5am = 1.0 days → 1 day
+        // Example: Jan 7 5am to Jan 8 1pm = 1.33 days → 2 days
+        var totalDays = (int)Math.Ceiling((returnDt - pickupDt).TotalDays);
+        if (totalDays < 1) totalDays = 1; // Safeguard: minimum 1 day
 
         var dailyRate = vehicle.DailyRate ?? category.DefaultDailyRate;
         var rentalAmount = dailyRate * (decimal)totalDays;
@@ -1059,10 +1105,17 @@ public static class BookingEndpoints
             protectionAmount = Math.Max(protectionPlan.MinFee, Math.Min(protectionAmount.Value, protectionPlan.MaxFee));
         }
 
-        // Get platform fee percentage from database config (default 5%)
-        var platformFeePercentage = await configService.GetConfigValueAsync<decimal>("Booking:PlatformFeePercentage", 5.0m);
+        // Get platform fee percentage from GlobalSettings (default 15%)
+        decimal platformFeePercentage = 15.0m;
+        var platformFeeSetting = await db.GlobalSettings
+            .FirstOrDefaultAsync(s => s.Key == "PlatformFeePercentage");
+        if (platformFeeSetting != null)
+        {
+            try { platformFeePercentage = JsonSerializer.Deserialize<decimal>(platformFeeSetting.ValueJson); } catch { }
+        }
         
-        var subtotal = rentalAmount + (driverAmount ?? 0m) + (insuranceAmount ?? 0m) + (protectionAmount ?? 0m);
+        // Calculate platform fee (only on rental amount + driver amount, not protection/insurance)
+        var subtotal = rentalAmount + (driverAmount ?? 0m);
         var platformFee = subtotal * (platformFeePercentage / 100m);
         var total = rentalAmount + depositAmount + (driverAmount ?? 0m) + (insuranceAmount ?? 0m) + (protectionAmount ?? 0m) + platformFee;
 
@@ -1110,10 +1163,18 @@ public static class BookingEndpoints
         if (newReturn <= booking.ReturnDateTime)
             return Results.BadRequest(new { error = "New return must be after current return" });
 
-        // Check conflicts for the vehicle
-        var conflict = await db.Bookings.AnyAsync(b => b.VehicleId == booking.VehicleId && b.Id != booking.Id && b.Status != "cancelled" && b.Status != "completed" && b.PickupDateTime < newReturn && b.ReturnDateTime > booking.PickupDateTime);
+        // Check conflicts for the vehicle with 4-hour buffer for turnaround
+        var newReturnWithBuffer = newReturn.AddHours(4);
+        var conflict = await db.Bookings.AnyAsync(b => 
+            b.VehicleId == booking.VehicleId && 
+            b.Id != booking.Id && 
+            b.Status != "cancelled" && 
+            b.Status != "completed" && 
+            b.PickupDateTime < newReturnWithBuffer && 
+            b.ReturnDateTime > booking.PickupDateTime);
+            
         if (conflict)
-            return Results.BadRequest(new { error = "Vehicle not available for the requested extension period" });
+            return Results.BadRequest(new { error = "Vehicle not available for the requested extension period. Another booking exists or a 4-hour buffer is required for cleaning." });
 
         // Calculate new total using pricing rules similar to CalculateBookingTotal
         var pickupDt = booking.PickupDateTime;
@@ -1122,8 +1183,9 @@ public static class BookingEndpoints
         if (category is null)
             return Results.BadRequest(new { error = "Vehicle category not configured" });
 
-        var totalDays = (returnDt.Date - pickupDt.Date).TotalDays;
-        if (totalDays < 1) totalDays = 1;
+        // Calculate rental days: exact time difference, rounded up (matches frontend Math.ceil)
+        var totalDays = (int)Math.Ceiling((returnDt - pickupDt).TotalDays);
+        if (totalDays < 1) totalDays = 1; // Safeguard: minimum 1 day
         var dailyRate = booking.Vehicle?.DailyRate ?? category.DefaultDailyRate;
         var rentalAmount = dailyRate * (decimal)totalDays;
         var depositAmount = category.DefaultDepositAmount;
@@ -1161,10 +1223,17 @@ public static class BookingEndpoints
             }
         }
 
-        // Get platform fee percentage from database config (default 5%)
-        var platformFeePercentage = await configService.GetConfigValueAsync<decimal>("Booking:PlatformFeePercentage", 5.0m);
+        // Get platform fee percentage from GlobalSettings (default 15%)
+        decimal platformFeePercentage = 15.0m;
+        var platformFeeSetting = await db.GlobalSettings
+            .FirstOrDefaultAsync(s => s.Key == "PlatformFeePercentage");
+        if (platformFeeSetting != null)
+        {
+            try { platformFeePercentage = JsonSerializer.Deserialize<decimal>(platformFeeSetting.ValueJson); } catch { }
+        }
         
-        var subtotal = rentalAmount + (driverAmount ?? 0m) + (insuranceAmount ?? 0m) + (protectionAmount ?? 0m);
+        // Calculate platform fee (only on rental amount + driver amount, not protection/insurance)
+        var subtotal = rentalAmount + (driverAmount ?? 0m);
         var platformFee = subtotal * (platformFeePercentage / 100m);
         var newTotal = rentalAmount + depositAmount + (driverAmount ?? 0m) + (insuranceAmount ?? 0m) + (protectionAmount ?? 0m) + platformFee;
 
@@ -1456,6 +1525,9 @@ public static class BookingEndpoints
         booking.PreTripRecordedAt = DateTime.UtcNow;
         booking.PreTripRecordedBy = userId;
         booking.ActualPickupDateTime = DateTime.UtcNow;
+        
+        // Update pickupDateTime to actual pickup time
+        booking.PickupDateTime = booking.ActualPickupDateTime.Value;
 
         // Update booking status to ongoing
         booking.Status = "ongoing";
@@ -1667,8 +1739,196 @@ public static class BookingEndpoints
             db.PaymentTransactions.Add(adjustmentTransaction);
         }
 
+        // ===== AUTOMATIC MILEAGE OVERAGE CALCULATION =====
+        decimal mileageOverageCharge = 0m;
+        int? actualKmDriven = null;
+        int? allowedKm = null;
+        int? overageKm = null;
+        decimal pricePerKm = 0m;
+        
+        if (booking.PreTripOdometer.HasValue && booking.PostTripOdometer.HasValue && booking.Vehicle != null)
+        {
+            actualKmDriven = booking.PostTripOdometer.Value - booking.PreTripOdometer.Value;
+            
+            // Try to get mileage configuration from InclusionsJson first, then fall back to database columns
+            int includedKm = 0;
+            if (!string.IsNullOrWhiteSpace(booking.Vehicle.InclusionsJson))
+            {
+                try
+                {
+                    var inclusions = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(booking.Vehicle.InclusionsJson);
+                    if (inclusions != null)
+                    {
+                        if (inclusions.TryGetValue("mileageAllowancePerDay", out var mileageAllowance))
+                            includedKm = mileageAllowance.GetInt32() * actualDays;
+                        
+                        if (inclusions.TryGetValue("extraKmRate", out var kmRate))
+                            pricePerKm = kmRate.GetDecimal();
+                    }
+                }
+                catch { /* Fall back to database columns */ }
+            }
+            
+            // Fall back to database columns if not found in JSON
+            if (includedKm == 0 && booking.Vehicle.IncludedKilometers > 0)
+                includedKm = booking.Vehicle.IncludedKilometers;
+            if (pricePerKm == 0 && booking.Vehicle.PricePerExtraKm > 0)
+                pricePerKm = booking.Vehicle.PricePerExtraKm;
+            
+            // Check if vehicle has mileage charging enabled and configured
+            if (booking.Vehicle.MileageChargingEnabled && includedKm > 0 && pricePerKm > 0)
+            {
+                allowedKm = includedKm;
+                
+                // Calculate overage
+                if (actualKmDriven > allowedKm)
+                {
+                    overageKm = actualKmDriven.Value - allowedKm.Value;
+                    mileageOverageCharge = overageKm.Value * pricePerKm;
+                    
+                    // Get or create mileage overage charge type
+                    var mileageChargeType = await db.PostRentalChargeTypes
+                        .FirstOrDefaultAsync(ct => ct.Code == "mileage_overage");
+                    
+                    if (mileageChargeType == null)
+                    {
+                        mileageChargeType = new PostRentalChargeType
+                        {
+                            Code = "mileage_overage",
+                            Name = "Mileage Overage",
+                            Description = "Charge for exceeding included kilometers",
+                            DefaultAmount = 0,
+                            Currency = "GHS",
+                            RecipientType = "owner",
+                            IsActive = true,
+                            CreatedAt = DateTime.UtcNow,
+                            UpdatedAt = DateTime.UtcNow
+                        };
+                        db.PostRentalChargeTypes.Add(mileageChargeType);
+                        await db.SaveChangesAsync(); // Save to get ID
+                    }
+                    
+                    // Create automatic mileage charge
+                    var mileageCharge = new BookingCharge
+                    {
+                        BookingId = booking.Id,
+                        ChargeTypeId = mileageChargeType.Id,
+                        Amount = mileageOverageCharge,
+                        Currency = booking.Currency,
+                        Label = $"Mileage Overage ({overageKm} km)",
+                        Notes = $"Automatic charge: {actualKmDriven} km driven, {allowedKm} km included, {overageKm} km overage @ {pricePerKm:F2}/km",
+                        Status = "approved", // Auto-approved since it's system-generated
+                        CreatedByUserId = userId,
+                        CreatedAt = DateTime.UtcNow,
+                        SettledAt = DateTime.UtcNow,
+                        EvidencePhotoUrlsJson = booking.PostTripPhotosJson ?? "[]"
+                    };
+                    
+                    db.BookingCharges.Add(mileageCharge);
+                    
+                    // Calculate platform fee on overage (typically 15%)
+                    decimal platformFeePercentage = 0.15m; // Default 15%
+                    var platformFeeSetting = await db.GlobalSettings
+                        .FirstOrDefaultAsync(s => s.Key == "PlatformFeePercentage");
+                    if (platformFeeSetting != null)
+                    {
+                        try
+                        {
+                            var feeValue = JsonSerializer.Deserialize<decimal>(platformFeeSetting.ValueJson);
+                            platformFeePercentage = feeValue / 100m;
+                        }
+                        catch
+                        {
+                            // Use default if parsing fails
+                        }
+                    }
+                    
+                    decimal overagePlatformFee = mileageOverageCharge * platformFeePercentage;
+                    
+                    // Update booking totals to include overage
+                    booking.RentalAmount += mileageOverageCharge;
+                    booking.PlatformFee = (booking.PlatformFee ?? 0) + overagePlatformFee;
+                    booking.TotalAmount += mileageOverageCharge;
+                    
+                    // Deduct overage charge from deposit
+                    if (booking.DepositAmount >= mileageOverageCharge)
+                    {
+                        booking.DepositAmount -= mileageOverageCharge;
+                    }
+                    else if (booking.DepositAmount > 0)
+                    {
+                        // Partial deduction - charge remaining to renter
+                        var remainingCharge = mileageOverageCharge - booking.DepositAmount;
+                        booking.DepositAmount = 0;
+                        
+                        // Create payment transaction for remaining balance
+                        var balanceTransaction = new PaymentTransaction
+                        {
+                            BookingId = booking.Id,
+                            UserId = booking.RenterId,
+                            Type = "payment",
+                            Status = "pending",
+                            Amount = remainingCharge,
+                            Currency = booking.Currency,
+                            Method = booking.PaymentMethod,
+                            Reference = $"MILEAGE-{booking.BookingReference}-{DateTime.UtcNow:yyyyMMddHHmmss}",
+                            MetadataJson = JsonSerializer.Serialize(new
+                            {
+                                reason = "Mileage overage charge (deposit insufficient)",
+                                actualKm = actualKmDriven,
+                                includedKm = allowedKm,
+                                overageKm,
+                                ratePerKm = pricePerKm,
+                                totalOverageCharge = mileageOverageCharge,
+                                depositUsed = booking.DepositAmount,
+                                remainingBalance = remainingCharge
+                            }),
+                            CreatedAt = DateTime.UtcNow
+                        };
+                        
+                        db.PaymentTransactions.Add(balanceTransaction);
+                    }
+                    else
+                    {
+                        // No deposit - full charge to renter
+                        var chargeTransaction = new PaymentTransaction
+                        {
+                            BookingId = booking.Id,
+                            UserId = booking.RenterId,
+                            Type = "payment",
+                            Status = "pending",
+                            Amount = mileageOverageCharge,
+                            Currency = booking.Currency,
+                            Method = booking.PaymentMethod,
+                            Reference = $"MILEAGE-{booking.BookingReference}-{DateTime.UtcNow:yyyyMMddHHmmss}",
+                            MetadataJson = JsonSerializer.Serialize(new
+                            {
+                                reason = "Mileage overage charge",
+                                actualKm = actualKmDriven,
+                                includedKm = allowedKm,
+                                overageKm,
+                                ratePerKm = pricePerKm,
+                                totalCharge = mileageOverageCharge
+                            }),
+                            CreatedAt = DateTime.UtcNow
+                        };
+                        
+                        db.PaymentTransactions.Add(chargeTransaction);
+                    }
+                }
+            }
+        }
+
         // Update ReturnDateTime to actual return time
-        booking.ReturnDateTime = actualReturn;
+        // Ensure returnDateTime is never before pickupDateTime to prevent negative durations
+        if (actualReturn < booking.PickupDateTime)
+        {
+            booking.ReturnDateTime = booking.PickupDateTime.AddHours(1); // Minimum 1 hour rental
+        }
+        else
+        {
+            booking.ReturnDateTime = actualReturn;
+        }
 
         // Update booking status to completed
         booking.Status = "completed";
@@ -1698,11 +1958,17 @@ public static class BookingEndpoints
             Console.WriteLine($"Error sending booking completed notification: {ex.Message}");
         }
 
-        // Auto-create deposit refund
+        // Auto-create deposit refund (with reduced amount if mileage charges were deducted)
         var existingRefund = await db.DepositRefunds.FirstOrDefaultAsync(r => r.BookingId == bookingId);
         
         if (existingRefund == null && booking.DepositAmount > 0)
         {
+            var refundNotes = "Auto-created deposit refund after trip completion";
+            if (mileageOverageCharge > 0)
+            {
+                refundNotes += $"\nMileage overage charge of {booking.Currency} {mileageOverageCharge:F2} deducted from deposit";
+            }
+            
             var refund = new DepositRefund
             {
                 BookingId = bookingId,
@@ -1712,7 +1978,7 @@ public static class BookingEndpoints
                 Status = "pending",
                 DueDate = DateTime.UtcNow.AddDays(2),
                 Reference = $"REF-{booking.BookingReference}-{DateTime.UtcNow:yyyyMMddHHmmss}",
-                Notes = "Auto-created deposit refund after trip completion"
+                Notes = refundNotes
             };
 
             db.DepositRefunds.Add(refund);
@@ -1773,6 +2039,24 @@ public static class BookingEndpoints
                 adjustmentAmount,
                 adjustmentType
             },
+            mileageCharge = mileageOverageCharge > 0 ? new
+            {
+                amount = mileageOverageCharge,
+                actualKmDriven,
+                allowedKm,
+                overageKm,
+                ratePerKm = booking.Vehicle?.PricePerExtraKm,
+                deductedFromDeposit = mileageOverageCharge,
+                remainingDeposit = booking.DepositAmount,
+                message = $"Mileage overage charge of {booking.Currency} {mileageOverageCharge:F2} applied ({overageKm} km @ {booking.Vehicle?.PricePerExtraKm:F2}/km). Deducted from security deposit."
+            } : null,
+            updatedBookingTotals = new
+            {
+                rentalAmount = booking.RentalAmount,
+                platformFee = booking.PlatformFee,
+                totalAmount = booking.TotalAmount,
+                depositAmount = booking.DepositAmount
+            },
             adjustment = adjustmentTransaction != null ? new
             {
                 transactionId = adjustmentTransaction.Id,
@@ -1785,7 +2069,9 @@ public static class BookingEndpoints
                     : $"Additional charge of {adjustmentTransaction.Amount:F2} {booking.Currency} pending for {actualDays - bookedDays} extra day(s)"
             } : null,
             recordedBy = userId,
-            message = "Trip completed successfully"
+            message = mileageOverageCharge > 0 
+                ? $"Trip completed. Mileage overage charge of {booking.Currency} {mileageOverageCharge:F2} applied."
+                : "Trip completed successfully"
         });
     }
 
@@ -1992,6 +2278,439 @@ public static class BookingEndpoints
             }
         });
     }
+
+    private static async Task<IResult> GetBookingByReferenceAsync(
+        string bookingReference,
+        ClaimsPrincipal principal,
+        AppDbContext db)
+    {
+        var booking = await db.Bookings
+            .Include(b => b.Renter)
+            .Include(b => b.Vehicle)
+                .ThenInclude(v => v!.Category)
+            .Include(b => b.Vehicle)
+                .ThenInclude(v => v!.City)
+            .Include(b => b.Driver)
+            .Include(b => b.ProtectionPlan)
+            .Include(b => b.InsurancePlan)
+            .Include(b => b.PromoCode)
+            .FirstOrDefaultAsync(b => b.BookingReference == bookingReference);
+
+        if (booking is null)
+            return Results.NotFound(new { error = "Booking not found" });
+
+        // Authorization check: Allow admins, renters (own booking), and guests (anonymous)
+        var userIdStr = principal.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!string.IsNullOrWhiteSpace(userIdStr) && Guid.TryParse(userIdStr, out var userId))
+        {
+            var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+            if (user != null)
+            {
+                // Authenticated user - check if admin or owns the booking
+                var isAdmin = user.Role == "admin";
+                var isRenter = booking.RenterId == userId;
+                var isOwner = booking.OwnerId == userId;
+                
+                if (!isAdmin && !isRenter && !isOwner)
+                {
+                    return Results.Forbid();
+                }
+            }
+        }
+        // If not authenticated, allow access (guest booking)
+
+        // Get owner information
+        var owner = await db.Users
+            .Include(u => u.OwnerProfile)
+            .FirstOrDefaultAsync(u => u.Id == booking.OwnerId);
+
+        // Format pickup location from JSON
+        var pickupLocation = "TBD";
+        if (!string.IsNullOrWhiteSpace(booking.PickupLocationJson))
+        {
+            try
+            {
+                var locationObj = JsonSerializer.Deserialize<JsonElement>(booking.PickupLocationJson);
+                if (locationObj.TryGetProperty("cityName", out var cityName))
+                {
+                    pickupLocation = cityName.GetString() ?? "TBD";
+                }
+                else if (locationObj.TryGetProperty("address", out var address))
+                {
+                    pickupLocation = address.GetString() ?? "TBD";
+                }
+            }
+            catch
+            {
+                pickupLocation = booking.PickupLocationJson;
+            }
+        }
+
+        var returnLocation = "TBD";
+        if (!string.IsNullOrWhiteSpace(booking.ReturnLocationJson))
+        {
+            try
+            {
+                var locationObj = JsonSerializer.Deserialize<JsonElement>(booking.ReturnLocationJson);
+                if (locationObj.TryGetProperty("cityName", out var cityName))
+                {
+                    returnLocation = cityName.GetString() ?? "TBD";
+                }
+                else if (locationObj.TryGetProperty("address", out var address))
+                {
+                    returnLocation = address.GetString() ?? "TBD";
+                }
+            }
+            catch
+            {
+                returnLocation = booking.ReturnLocationJson;
+            }
+        }
+
+        // Parse vehicle photos
+        var photos = new List<string>();
+        if (!string.IsNullOrWhiteSpace(booking.Vehicle?.PhotosJson))
+        {
+            try
+            {
+                photos = JsonSerializer.Deserialize<List<string>>(booking.Vehicle.PhotosJson) ?? new List<string>();
+            }
+            catch { }
+        }
+
+        return Results.Ok(new
+        {
+            id = booking.Id,
+            bookingReference = booking.BookingReference,
+            status = booking.Status,
+            paymentStatus = booking.PaymentStatus,
+            pickupDateTime = booking.PickupDateTime,
+            returnDateTime = booking.ReturnDateTime,
+            pickupLocation = pickupLocation,
+            returnLocation = returnLocation,
+            withDriver = booking.WithDriver,
+            currency = booking.Currency,
+            rentalAmount = booking.RentalAmount,
+            depositAmount = booking.DepositAmount,
+            driverAmount = booking.DriverAmount,
+            insuranceAmount = booking.InsuranceAmount,
+            protectionAmount = booking.ProtectionAmount,
+            platformFee = booking.PlatformFee,
+            promoDiscountAmount = booking.PromoDiscountAmount,
+            totalAmount = booking.TotalAmount,
+            paymentMethod = booking.PaymentMethod,
+            createdAt = booking.CreatedAt,
+            agreementSigned = booking.AgreementSigned,
+            agreementSignedAt = booking.AgreementSignedAt,
+            vehicle = booking.Vehicle == null ? null : new
+            {
+                id = booking.Vehicle.Id,
+                make = booking.Vehicle.Make,
+                model = booking.Vehicle.Model,
+                year = booking.Vehicle.Year,
+                plateNumber = booking.Vehicle.PlateNumber,
+                transmission = booking.Vehicle.Transmission,
+                fuelType = booking.Vehicle.FuelType,
+                seatingCapacity = booking.Vehicle.SeatingCapacity,
+                hasAC = booking.Vehicle.HasAC,
+                dailyRate = booking.Vehicle.DailyRate,
+                photos = photos,
+                category = booking.Vehicle.Category == null ? null : new
+                {
+                    name = booking.Vehicle.Category.Name,
+                    defaultDailyRate = booking.Vehicle.Category.DefaultDailyRate,
+                    defaultDepositAmount = booking.Vehicle.Category.DefaultDepositAmount
+                },
+                city = booking.Vehicle.City == null ? null : new
+                {
+                    name = booking.Vehicle.City.Name
+                }
+            },
+            renter = booking.Renter == null ? null : new
+            {
+                firstName = booking.Renter.FirstName,
+                lastName = booking.Renter.LastName,
+                email = booking.Renter.Email,
+                phone = booking.Renter.Phone
+            },
+            guestEmail = booking.GuestEmail,
+            guestPhone = booking.GuestPhone,
+            guestFirstName = booking.GuestFirstName,
+            guestLastName = booking.GuestLastName,
+            driver = booking.Driver == null ? null : new
+            {
+                firstName = booking.Driver.FirstName,
+                lastName = booking.Driver.LastName,
+                phone = booking.Driver.Phone
+            },
+            owner = owner == null ? null : new
+            {
+                firstName = owner.FirstName,
+                lastName = owner.LastName,
+                email = owner.Email,
+                phone = owner.Phone,
+                businessPhone = owner.OwnerProfile?.BusinessPhone,
+                businessAddress = owner.OwnerProfile?.BusinessAddress,
+                gpsAddress = owner.OwnerProfile?.GpsAddress,
+                pickupInstructions = owner.OwnerProfile?.PickupInstructions
+            },
+            protectionPlan = booking.ProtectionPlan == null ? null : new
+            {
+                name = booking.ProtectionPlan.Name,
+                code = booking.ProtectionPlan.Code,
+                dailyPrice = booking.ProtectionPlan.DailyPrice,
+                fixedPrice = booking.ProtectionPlan.FixedPrice
+            },
+            insurancePlan = booking.InsurancePlan == null ? null : new
+            {
+                name = booking.InsurancePlan.Name,
+                dailyPrice = booking.InsurancePlan.DailyPrice
+            },
+            promoCode = booking.PromoCode == null ? null : new
+            {
+                code = booking.PromoCode.Code,
+                promoType = booking.PromoCode.PromoType,
+                discountValue = booking.PromoCode.DiscountValue
+            }
+        });
+    }
+
+    private static async Task<IResult> SignAgreementAsync(
+        Guid bookingId,
+        [FromBody] SignAgreementRequest request,
+        ClaimsPrincipal principal,
+        HttpContext context,
+        AppDbContext db)
+    {
+        var booking = await db.Bookings
+            .Include(b => b.Renter)
+            .Include(b => b.Vehicle)
+            .FirstOrDefaultAsync(b => b.Id == bookingId);
+
+        if (booking is null)
+            return Results.NotFound(new { error = "Booking not found" });
+
+        // Authorization check: Allow admins, renters (own booking), and guests (anonymous)
+        var userIdStr = principal.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!string.IsNullOrWhiteSpace(userIdStr) && Guid.TryParse(userIdStr, out var userId))
+        {
+            var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+            if (user != null)
+            {
+                // Authenticated user - check if admin or owns the booking
+                var isAdmin = user.Role == "admin";
+                var isRenter = booking.RenterId == userId;
+                
+                if (!isAdmin && !isRenter)
+                {
+                    return Results.Forbid();
+                }
+            }
+        }
+        // If not authenticated, allow access (guest booking)
+
+        // Only allow agreement signing for unpaid bookings
+        if (booking.PaymentStatus != "unpaid")
+            return Results.BadRequest(new { error = "Agreement can only be signed for unpaid bookings" });
+
+        if (booking.AgreementSigned)
+            return Results.BadRequest(new { error = "Agreement has already been signed" });
+
+        // Get IP address
+        var ipAddress = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
+        // Update booking with agreement signature
+        booking.AgreementSigned = true;
+        booking.AgreementSignedAt = DateTime.UtcNow;
+        booking.AgreementSignedBy = request.SignedByName;
+        booking.AgreementIpAddress = ipAddress;
+        booking.AgreementSignatureData = request.SignatureData; // Can be base64 image or acceptance token
+        booking.UpdatedAt = DateTime.UtcNow;
+
+        await db.SaveChangesAsync();
+
+        return Results.Ok(new
+        {
+            message = "Agreement signed successfully",
+            bookingReference = booking.BookingReference,
+            agreementSigned = true,
+            agreementSignedAt = booking.AgreementSignedAt,
+            signedBy = booking.AgreementSignedBy
+        });
+    }
+
+    private static async Task<IResult> InitiatePaymentAsync(
+        Guid bookingId,
+        [FromBody] InitiatePaymentRequest request,
+        ClaimsPrincipal principal,
+        AppDbContext db,
+        IPaystackPaymentService paystackService,
+        IStripePaymentService stripeService,
+        IAppConfigService configService)
+    {
+        var booking = await db.Bookings
+            .Include(b => b.Renter)
+            .Include(b => b.Vehicle)
+            .FirstOrDefaultAsync(b => b.Id == bookingId);
+
+        if (booking is null)
+            return Results.NotFound(new { error = "Booking not found" });
+
+        // Authorization check: Allow admins, renters (own booking), and guests (anonymous)
+        var userIdStr = principal.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!string.IsNullOrWhiteSpace(userIdStr) && Guid.TryParse(userIdStr, out var userId))
+        {
+            var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+            if (user != null)
+            {
+                // Authenticated user - check if admin or owns the booking
+                var isAdmin = user.Role == "admin";
+                var isRenter = booking.RenterId == userId;
+                
+                if (!isAdmin && !isRenter)
+                {
+                    return Results.Forbid();
+                }
+            }
+        }
+        // If not authenticated, allow access (guest booking)
+
+        // Only allow payment initiation for unpaid bookings
+        if (booking.PaymentStatus != "unpaid")
+            return Results.BadRequest(new { error = "Payment can only be initiated for unpaid bookings" });
+
+        // Check if booking is not cancelled
+        if (booking.Status == "cancelled")
+            return Results.BadRequest(new { error = "Cannot initiate payment for cancelled booking" });
+
+        // Optionally require agreement to be signed first
+        var requireAgreement = await configService.GetConfigValueAsync("Payment:RequireAgreementBeforePayment");
+        if (requireAgreement?.ToLower() == "true" && !booking.AgreementSigned)
+        {
+            return Results.BadRequest(new { error = "Rental agreement must be signed before initiating payment" });
+        }
+
+        // Determine email for payment
+        var email = request.Email ?? booking.Renter?.Email ?? booking.GuestEmail;
+        if (string.IsNullOrWhiteSpace(email))
+            return Results.BadRequest(new { error = "Email is required for payment" });
+
+        // Generate payment reference
+        var paymentReference = $"PAY-{booking.BookingReference}-{Guid.NewGuid().ToString("N")[..8].ToUpper()}";
+
+        // Create payment transaction record
+        var transaction = new PaymentTransaction
+        {
+            UserId = booking.RenterId,
+            BookingId = booking.Id,
+            Type = "payment",
+            Status = "pending",
+            Amount = booking.TotalAmount,
+            Currency = booking.Currency,
+            Method = request.PaymentMethod?.ToLower() ?? "momo",
+            Reference = paymentReference,
+            CreatedAt = DateTime.UtcNow
+        };
+
+        db.PaymentTransactions.Add(transaction);
+        await db.SaveChangesAsync();
+
+        try
+        {
+            // Determine payment provider based on method
+            var paymentMethod = request.PaymentMethod?.ToLower() ?? "momo";
+            
+            if (paymentMethod == "card")
+            {
+                // Use Stripe for card payments
+                try
+                {
+                    var metadata = new Dictionary<string, string>
+                    {
+                        { "booking_id", booking.Id.ToString() },
+                        { "booking_reference", booking.BookingReference },
+                        { "reference", paymentReference }
+                    };
+
+                    // Create Stripe customer if needed
+                    var customerName = booking.Renter != null 
+                        ? $"{booking.Renter.FirstName} {booking.Renter.LastName}".Trim()
+                        : $"{booking.GuestFirstName} {booking.GuestLastName}".Trim();
+                    
+                    var customerId = await stripeService.CreateCustomerAsync(email, customerName, booking.Renter?.Phone ?? booking.GuestPhone ?? "");
+
+                    var paymentIntent = await stripeService.CreatePaymentIntentAsync(
+                        booking.TotalAmount,
+                        booking.Currency,
+                        customerId,
+                        metadata
+                    );
+
+                    transaction.ExternalTransactionId = paymentIntent.Id;
+                    await db.SaveChangesAsync();
+
+                    return Results.Ok(new
+                    {
+                        paymentProvider = "stripe",
+                        paymentReference = paymentReference,
+                        clientSecret = paymentIntent.ClientSecret,
+                        paymentIntentId = paymentIntent.Id,
+                        amount = booking.TotalAmount,
+                        currency = booking.Currency,
+                        bookingReference = booking.BookingReference
+                    });
+                }
+                catch (PaymentProviderNotConfiguredException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message });
+                }
+            }
+            else
+            {
+                // Use Paystack for mobile money and other methods
+                try
+                {
+                    var metadata = new Dictionary<string, string>
+                    {
+                        { "booking_id", booking.Id.ToString() },
+                        { "booking_reference", booking.BookingReference },
+                        { "payment_method", paymentMethod }
+                    };
+
+                    var result = await paystackService.InitializeTransactionAsync(
+                        booking.TotalAmount,
+                        email,
+                        paymentReference,
+                        metadata
+                    );
+
+                    transaction.ExternalTransactionId = result.Reference;
+                    await db.SaveChangesAsync();
+
+                    return Results.Ok(new
+                    {
+                        paymentProvider = "paystack",
+                        paymentReference = result.Reference,
+                        authorizationUrl = result.AuthorizationUrl,
+                        amount = booking.TotalAmount,
+                        currency = booking.Currency,
+                        bookingReference = booking.BookingReference
+                    });
+                }
+                catch (PaymentProviderNotConfiguredException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message });
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            transaction.Status = "failed";
+            await db.SaveChangesAsync();
+            
+            return Results.BadRequest(new { error = $"Payment initiation failed: {ex.Message}" });
+        }
+    }
 }
 
 public record UpdateGuestContactRequest(
@@ -1999,4 +2718,14 @@ public record UpdateGuestContactRequest(
     string? NewPhone,
     string? NewFirstName,
     string? NewLastName
+);
+
+public record SignAgreementRequest(
+    string SignedByName,
+    string? SignatureData
+);
+
+public record InitiatePaymentRequest(
+    string? Email,
+    string? PaymentMethod
 );

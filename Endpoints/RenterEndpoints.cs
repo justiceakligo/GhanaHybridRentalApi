@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text;
 using System.Text.Json;
 using GhanaHybridRentalApi.Data;
 using GhanaHybridRentalApi.Models;
@@ -6,6 +7,9 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using GhanaHybridRentalApi.Extensions; // Absolutize URL helper
+using QuestPDF.Fluent;
+using QuestPDF.Helpers;
+using QuestPDF.Infrastructure;
 
 namespace GhanaHybridRentalApi.Endpoints;
 
@@ -84,6 +88,8 @@ public static class RenterEndpoints
         app.MapGet("/api/v1/renter/rental-agreements", GetRenterAgreementsAsync)
             .RequireAuthorization("RenterOnly");
         app.MapGet("/api/v1/renter/bookings/{bookingId:guid}/rental-agreement", GetRenterBookingAgreementAsync)
+            .RequireAuthorization("RenterOnly");
+        app.MapGet("/api/v1/renter/bookings/{bookingId:guid}/rental-agreement/download", DownloadRenterAgreementAsync)
             .RequireAuthorization("RenterOnly");
     }
 
@@ -247,6 +253,15 @@ public static class RenterEndpoints
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 50)
     {
+        // Get platform fee for pricing display
+        decimal platformFeePercentage = 15.0m;
+        var platformFeeSetting = await db.GlobalSettings
+            .FirstOrDefaultAsync(s => s.Key == "PlatformFeePercentage");
+        if (platformFeeSetting != null)
+        {
+            try { platformFeePercentage = JsonSerializer.Deserialize<decimal>(platformFeeSetting.ValueJson); } catch { }
+        }
+        
         var query = db.Vehicles
             .Include(v => v.Category)
             .Include(v => v.Owner)
@@ -390,7 +405,18 @@ public static class RenterEndpoints
                     ),
                     // Resolved daily rate (vehicle override or category default)
                     dailyRate = (v.DailyRate ?? v.Category!.DefaultDailyRate),
-                    vehicleDailyRate = v.DailyRate
+                    vehicleDailyRate = v.DailyRate,
+                    
+                    // Pricing transparency for guests
+                    pricing = new
+                    {
+                        dailyRate = (v.DailyRate ?? v.Category!.DefaultDailyRate),
+                        platformFeePercentage,
+                        depositAmount = v.Category!.DefaultDepositAmount,
+                        currency = "GHS",
+                        // Example 1-day pricing
+                        estimatedDailyTotal = (v.DailyRate ?? v.Category!.DefaultDailyRate) * (1 + (platformFeePercentage / 100m))
+                    }
             }).ToList()
         };
 
@@ -419,6 +445,15 @@ public static class RenterEndpoints
         AppDbContext db,
         HttpContext httpContext)
     {
+        // Get platform fee for pricing display
+        decimal platformFeePercentage = 15.0m;
+        var platformFeeSetting = await db.GlobalSettings
+            .FirstOrDefaultAsync(s => s.Key == "PlatformFeePercentage");
+        if (platformFeeSetting != null)
+        {
+            try { platformFeePercentage = JsonSerializer.Deserialize<decimal>(platformFeeSetting.ValueJson); } catch { }
+        }
+        
         var vehicle = await db.Vehicles
             .Include(v => v.Category)
             .Include(v => v.Owner)
@@ -498,7 +533,27 @@ public static class RenterEndpoints
                 : SafeParsePhotos(vehicle.PhotosJson).FirstOrDefault(p => p != null && (p.ToLowerInvariant().Contains("insurance") || p.ToLowerInvariant().Contains("ownership") || p.ToLowerInvariant().Contains("mot") || p.ToLowerInvariant().Contains("nct")))),
             roadworthinessDocumentUrl = Absolutize(!string.IsNullOrWhiteSpace(vehicle.RoadworthinessDocumentUrl)
                 ? vehicle.RoadworthinessDocumentUrl
-                : SafeParsePhotos(vehicle.PhotosJson).FirstOrDefault(p => p != null && (p.ToLowerInvariant().Contains("roadworth") || p.ToLowerInvariant().Contains("ownership") || p.ToLowerInvariant().Contains("mot") || p.ToLowerInvariant().Contains("nct")) ) )
+                : SafeParsePhotos(vehicle.PhotosJson).FirstOrDefault(p => p != null && (p.ToLowerInvariant().Contains("roadworth") || p.ToLowerInvariant().Contains("ownership") || p.ToLowerInvariant().Contains("mot") || p.ToLowerInvariant().Contains("nct")) ) ),
+            
+            // Transparent pricing for guests
+            pricing = new
+            {
+                dailyRate = vehicle.DailyRate ?? vehicle.Category?.DefaultDailyRate,
+                platformFeePercentage,
+                platformFeeAmount = (vehicle.DailyRate ?? vehicle.Category?.DefaultDailyRate ?? 0) * (platformFeePercentage / 100m),
+                depositAmount = vehicle.Category?.DefaultDepositAmount,
+                currency = "GHS",
+                // Sample 1-day pricing breakdown
+                sampleDayBreakdown = new
+                {
+                    rentalAmount = vehicle.DailyRate ?? vehicle.Category?.DefaultDailyRate,
+                    platformFee = (vehicle.DailyRate ?? vehicle.Category?.DefaultDailyRate ?? 0) * (platformFeePercentage / 100m),
+                    totalPerDay = (vehicle.DailyRate ?? vehicle.Category?.DefaultDailyRate ?? 0) * (1 + (platformFeePercentage / 100m)),
+                    deposit = vehicle.Category?.DefaultDepositAmount,
+                    grandTotal = ((vehicle.DailyRate ?? vehicle.Category?.DefaultDailyRate ?? 0) * (1 + (platformFeePercentage / 100m))) + (vehicle.Category?.DefaultDepositAmount ?? 0)
+                },
+                note = "Use /api/v1/bookings/calculate-price for exact multi-day pricing"
+            }
         });
     }
 
@@ -761,6 +816,79 @@ public static class RenterEndpoints
         if (profile is null)
             return Results.NotFound(new { error = "Renter profile not found" });
 
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+        if (user is null)
+            return Results.NotFound(new { error = "User not found" });
+
+        // Handle email update with validation and uniqueness check
+        if (!string.IsNullOrWhiteSpace(request.Email) && request.Email != user.Email)
+        {
+            // Basic email format validation
+            if (!request.Email.Contains("@") || !request.Email.Contains("."))
+                return Results.BadRequest(new { error = "Invalid email format" });
+
+            // Check if email is already in use by another user
+            var emailExists = await db.Users.AnyAsync(u => u.Email == request.Email && u.Id != userId);
+            if (emailExists)
+                return Results.BadRequest(new { error = "Email already in use by another account" });
+
+            // Log the change for audit
+            db.ProfileChangeAudits.Add(new ProfileChangeAudit
+            {
+                UserId = userId,
+                Field = "Email",
+                OldValue = user.Email,
+                NewValue = request.Email,
+                ChangedByUserId = userId,
+                CreatedAt = DateTime.UtcNow
+            });
+
+            user.Email = request.Email;
+        }
+
+        // Handle phone update with validation and uniqueness check
+        if (!string.IsNullOrWhiteSpace(request.Phone) && request.Phone != user.Phone)
+        {
+            // Normalize phone number
+            var normalizedPhone = request.Phone.Trim().Replace(" ", "").Replace("-", "");
+            if (!normalizedPhone.StartsWith("+"))
+            {
+                // Add Ghana country code if missing
+                if (normalizedPhone.StartsWith("0"))
+                    normalizedPhone = "+233" + normalizedPhone.Substring(1);
+                else if (!normalizedPhone.StartsWith("233"))
+                    normalizedPhone = "+233" + normalizedPhone;
+                else
+                    normalizedPhone = "+" + normalizedPhone;
+            }
+
+            // Check if phone is already in use by another user
+            var phoneExists = await db.Users.AnyAsync(u => u.Phone == normalizedPhone && u.Id != userId);
+            if (phoneExists)
+                return Results.BadRequest(new { error = "Phone number already in use by another account" });
+
+            // Log the change for audit
+            db.ProfileChangeAudits.Add(new ProfileChangeAudit
+            {
+                UserId = userId,
+                Field = "Phone",
+                OldValue = user.Phone,
+                NewValue = normalizedPhone,
+                ChangedByUserId = userId,
+                CreatedAt = DateTime.UtcNow
+            });
+
+            user.Phone = normalizedPhone;
+            user.PhoneVerified = false; // Reset verification status when phone changes
+        }
+
+        // Update first name and last name on User table
+        if (!string.IsNullOrWhiteSpace(request.FirstName))
+            user.FirstName = request.FirstName;
+
+        if (!string.IsNullOrWhiteSpace(request.LastName))
+            user.LastName = request.LastName;
+
         if (!string.IsNullOrWhiteSpace(request.FullName))
             profile.FullName = request.FullName;
 
@@ -796,6 +924,20 @@ public static class RenterEndpoints
 
         if (!string.IsNullOrWhiteSpace(request.PassportPhotoUrl))
             profile.PassportPhotoUrl = request.PassportPhotoUrl;
+
+        // Address Information
+        if (!string.IsNullOrWhiteSpace(request.StreetAddress))
+            profile.StreetAddress = request.StreetAddress;
+
+        if (!string.IsNullOrWhiteSpace(request.City))
+            profile.City = request.City;
+
+        // Emergency Contact
+        if (!string.IsNullOrWhiteSpace(request.EmergencyContactName))
+            profile.EmergencyContactName = request.EmergencyContactName;
+
+        if (!string.IsNullOrWhiteSpace(request.EmergencyContactPhone))
+            profile.EmergencyContactPhone = request.EmergencyContactPhone;
 
         // Update verification status
         var hasDriverLicense = !string.IsNullOrWhiteSpace(profile.DriverLicenseNumber) && 
@@ -920,11 +1062,207 @@ public static class RenterEndpoints
             ipAddress = acceptance.IpAddress
         });
     }
+
+    // Renter can download their signed rental agreement as PDF
+    private static async Task<IResult> DownloadRenterAgreementAsync(
+        Guid bookingId,
+        ClaimsPrincipal principal,
+        AppDbContext db)
+    {
+        var userIdStr = principal.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (string.IsNullOrWhiteSpace(userIdStr) || !Guid.TryParse(userIdStr, out var userId))
+            return Results.Unauthorized();
+
+        var booking = await db.Bookings
+            .Include(b => b.Vehicle)
+            .Include(b => b.Renter)
+            .FirstOrDefaultAsync(b => b.Id == bookingId);
+            
+        if (booking is null)
+            return Results.NotFound(new { error = "Booking not found" });
+
+        // Verify this is renter's booking
+        if (booking.RenterId != userId)
+            return Results.Forbid();
+
+        var acceptance = await db.RentalAgreementAcceptances
+            .FirstOrDefaultAsync(a => a.BookingId == bookingId && a.RenterId == userId);
+
+        if (acceptance is null)
+            return Results.NotFound(new { error = "No rental agreement signed for this booking" });
+
+        // Generate real PDF for rental agreement
+        var pdfBytes = GenerateAgreementPdf(booking, acceptance);
+
+        return Results.File(
+            pdfBytes,
+            "application/pdf",
+            $"rental-agreement-{booking.BookingReference}.pdf"
+        );
+    }
+
+    private static byte[] GenerateAgreementPdf(Models.Booking booking, Models.RentalAgreementAcceptance acceptance)
+    {
+        // Use fully qualified alias to avoid conflict with Models.Document
+        var pdfDocument = QuestPDF.Fluent.Document.Create(container =>
+        {
+            container.Page(page =>
+            {
+                page.Size(PageSizes.A4);
+                page.Margin(2, Unit.Centimetre);
+                page.PageColor(Colors.White);
+                page.DefaultTextStyle(x => x.FontSize(11).FontColor(Colors.Black));
+
+                page.Header().Column(column =>
+                {
+                    column.Item().AlignCenter().Text("VEHICLE RENTAL AGREEMENT")
+                        .Bold().FontSize(18).FontColor(Colors.Blue.Darken2);
+                    
+                    column.Item().AlignCenter().Text("RYVE RENTAL")
+                        .Bold().FontSize(14).FontColor(Colors.Blue.Darken1);
+                    
+                    column.Item().PaddingTop(5).BorderBottom(1).BorderColor(Colors.Grey.Lighten2);
+                });
+
+                page.Content().PaddingVertical(10).Column(column =>
+                {
+                    // Agreement metadata
+                    column.Item().Row(row =>
+                    {
+                        row.RelativeItem().Text($"Agreement Date: {acceptance.AcceptedAt:yyyy-MM-dd HH:mm} UTC").FontSize(9);
+                        row.RelativeItem().AlignRight().Text($"Booking Ref: {booking.BookingReference}").FontSize(9);
+                    });
+                    column.Item().Text($"Template: {acceptance.TemplateCode} v{acceptance.TemplateVersion}").FontSize(9);
+
+                    // Renter Information
+                    column.Item().PaddingTop(15).Text("RENTER INFORMATION").Bold().FontSize(12).FontColor(Colors.Blue.Darken1);
+                    column.Item().PaddingTop(5).PaddingLeft(10).Column(renterColumn =>
+                    {
+                        renterColumn.Item().Text($"Name: {booking.Renter?.FirstName} {booking.Renter?.LastName}");
+                        renterColumn.Item().Text($"Email: {booking.Renter?.Email}");
+                        renterColumn.Item().Text($"Phone: {booking.Renter?.Phone}");
+                    });
+
+                    // Vehicle Information
+                    column.Item().PaddingTop(15).Text("VEHICLE INFORMATION").Bold().FontSize(12).FontColor(Colors.Blue.Darken1);
+                    column.Item().PaddingTop(5).PaddingLeft(10).Column(vehicleColumn =>
+                    {
+                        vehicleColumn.Item().Text($"Vehicle: {booking.Vehicle?.Make} {booking.Vehicle?.Model} {booking.Vehicle?.Year}");
+                        vehicleColumn.Item().Text($"Plate Number: {booking.Vehicle?.PlateNumber}");
+                    });
+
+                    // Rental Period
+                    column.Item().PaddingTop(15).Text("RENTAL PERIOD").Bold().FontSize(12).FontColor(Colors.Blue.Darken1);
+                    column.Item().PaddingTop(5).PaddingLeft(10).Column(periodColumn =>
+                    {
+                        periodColumn.Item().Text($"Pickup: {booking.PickupDateTime:yyyy-MM-dd HH:mm}");
+                        periodColumn.Item().Text($"Return: {booking.ReturnDateTime:yyyy-MM-dd HH:mm}");
+                    });
+
+                    // Agreement Terms
+                    column.Item().PaddingTop(15).Text("AGREEMENT TERMS").Bold().FontSize(12).FontColor(Colors.Blue.Darken1);
+                    column.Item().PaddingTop(5).PaddingLeft(10).Text(acceptance.AgreementSnapshot ?? "[Agreement content]").FontSize(10);
+
+                    // Acceptance Confirmations
+                    column.Item().PaddingTop(15).Text("ACCEPTANCE CONFIRMATIONS").Bold().FontSize(12).FontColor(Colors.Blue.Darken1);
+                    column.Item().PaddingTop(5).PaddingLeft(10).Column(acceptColumn =>
+                    {
+                        acceptColumn.Item().Text($"✓ No Smoking Policy: {(acceptance.AcceptedNoSmoking ? "ACCEPTED" : "NOT ACCEPTED")}");
+                        acceptColumn.Item().Text($"✓ Fines & Tickets Responsibility: {(acceptance.AcceptedFinesAndTickets ? "ACCEPTED" : "NOT ACCEPTED")}");
+                        acceptColumn.Item().Text($"✓ Accident Procedure: {(acceptance.AcceptedAccidentProcedure ? "ACCEPTED" : "NOT ACCEPTED")}");
+                    });
+
+                    // Digital Signature
+                    column.Item().PaddingTop(20).BorderTop(1).BorderColor(Colors.Grey.Lighten2).PaddingTop(10)
+                        .Text("DIGITAL SIGNATURE").Bold().FontSize(12).FontColor(Colors.Blue.Darken1);
+                    column.Item().PaddingTop(5).PaddingLeft(10).Column(signColumn =>
+                    {
+                        signColumn.Item().Text($"Signed By: {booking.Renter?.FirstName} {booking.Renter?.LastName}").Bold();
+                        signColumn.Item().Text($"Date & Time: {acceptance.AcceptedAt:yyyy-MM-dd HH:mm:ss} UTC");
+                        signColumn.Item().Text($"IP Address: {acceptance.IpAddress}");
+                    });
+                });
+
+                page.Footer().AlignCenter().Column(column =>
+                {
+                    column.Item().BorderTop(1).BorderColor(Colors.Grey.Lighten2).PaddingTop(5)
+                        .Text("This is a legally binding digital agreement.").FontSize(8).Italic();
+                    column.Item().Text("Acceptance was recorded electronically with audit trail.").FontSize(8).Italic();
+                });
+            });
+        });
+
+        return pdfDocument.GeneratePdf();
+    }
+
+    private static string GenerateAgreementDocument(Models.Booking booking, Models.RentalAgreementAcceptance acceptance)
+    {
+        var sb = new StringBuilder();
+        
+        sb.AppendLine("═══════════════════════════════════════════════════════════════");
+        sb.AppendLine("                    VEHICLE RENTAL AGREEMENT");
+        sb.AppendLine("                         RYVE RENTAL");
+        sb.AppendLine("═══════════════════════════════════════════════════════════════");
+        sb.AppendLine();
+        sb.AppendLine($"Agreement Date: {acceptance.AcceptedAt:yyyy-MM-dd HH:mm} UTC");
+        sb.AppendLine($"Booking Reference: {booking.BookingReference}");
+        sb.AppendLine($"Template Version: {acceptance.TemplateCode} v{acceptance.TemplateVersion}");
+        sb.AppendLine();
+        sb.AppendLine("───────────────────────────────────────────────────────────────");
+        sb.AppendLine("RENTER INFORMATION");
+        sb.AppendLine("───────────────────────────────────────────────────────────────");
+        sb.AppendLine($"Name: {booking.Renter?.FirstName} {booking.Renter?.LastName}");
+        sb.AppendLine($"Email: {booking.Renter?.Email}");
+        sb.AppendLine($"Phone: {booking.Renter?.Phone}");
+        sb.AppendLine();
+        sb.AppendLine("───────────────────────────────────────────────────────────────");
+        sb.AppendLine("VEHICLE INFORMATION");
+        sb.AppendLine("───────────────────────────────────────────────────────────────");
+        sb.AppendLine($"Vehicle: {booking.Vehicle?.Make} {booking.Vehicle?.Model} {booking.Vehicle?.Year}");
+        sb.AppendLine($"Plate Number: {booking.Vehicle?.PlateNumber}");
+        sb.AppendLine();
+        sb.AppendLine("───────────────────────────────────────────────────────────────");
+        sb.AppendLine("RENTAL PERIOD");
+        sb.AppendLine("───────────────────────────────────────────────────────────────");
+        sb.AppendLine($"Pickup: {booking.PickupDateTime:yyyy-MM-dd HH:mm}");
+        sb.AppendLine($"Return: {booking.ReturnDateTime:yyyy-MM-dd HH:mm}");
+        sb.AppendLine();
+        sb.AppendLine("───────────────────────────────────────────────────────────────");
+        sb.AppendLine("AGREEMENT TERMS");
+        sb.AppendLine("───────────────────────────────────────────────────────────────");
+        sb.AppendLine();
+        sb.AppendLine(acceptance.AgreementSnapshot ?? "[Agreement content]");
+        sb.AppendLine();
+        sb.AppendLine("───────────────────────────────────────────────────────────────");
+        sb.AppendLine("ACCEPTANCE CONFIRMATIONS");
+        sb.AppendLine("───────────────────────────────────────────────────────────────");
+        sb.AppendLine($"✓ No Smoking Policy: {(acceptance.AcceptedNoSmoking ? "ACCEPTED" : "NOT ACCEPTED")}");
+        sb.AppendLine($"✓ Fines & Tickets Responsibility: {(acceptance.AcceptedFinesAndTickets ? "ACCEPTED" : "NOT ACCEPTED")}");
+        sb.AppendLine($"✓ Accident Procedure: {(acceptance.AcceptedAccidentProcedure ? "ACCEPTED" : "NOT ACCEPTED")}");
+        sb.AppendLine();
+        sb.AppendLine("───────────────────────────────────────────────────────────────");
+        sb.AppendLine("DIGITAL SIGNATURE");
+        sb.AppendLine("───────────────────────────────────────────────────────────────");
+        sb.AppendLine($"Signed By: {booking.Renter?.FirstName} {booking.Renter?.LastName}");
+        sb.AppendLine($"Date & Time: {acceptance.AcceptedAt:yyyy-MM-dd HH:mm:ss} UTC");
+        sb.AppendLine($"IP Address: {acceptance.IpAddress}");
+        sb.AppendLine();
+        sb.AppendLine("═══════════════════════════════════════════════════════════════");
+        sb.AppendLine("This is a legally binding digital agreement.");
+        sb.AppendLine("Acceptance was recorded electronically with audit trail.");
+        sb.AppendLine("═══════════════════════════════════════════════════════════════");
+        
+        return sb.ToString();
+    }
 }
 
 public record UploadDocumentRequest(string DocumentType, string DocumentUrl, Guid? DocumentId);
 
 public record UpdateRenterProfileRequest(
+    string? Email,
+    string? Phone,
+    string? FirstName,
+    string? LastName,
     string? FullName, 
     string? Nationality, 
     DateTime? Dob,
@@ -935,5 +1273,9 @@ public record UpdateRenterProfileRequest(
     string? NationalIdPhotoUrl,
     string? PassportNumber,
     DateTime? PassportExpiryDate,
-    string? PassportPhotoUrl
+    string? PassportPhotoUrl,
+    string? StreetAddress,
+    string? City,
+    string? EmergencyContactName,
+    string? EmergencyContactPhone
 );

@@ -1898,6 +1898,9 @@ public static class AdminEndpoints
         var insuranceRevenue = paidBookings.Sum(b => b.InsuranceAmount ?? 0);
         var depositRevenue = paidBookings.Sum(b => b.DepositAmount);
         
+        // Admin earns double the platform fee (charged to both renter as service fee and owner as platform fee)
+        var adminPlatformRevenue = platformFeeRevenue * 2;
+        
         // Owner revenue (rental + driver fees - platform commission)
         var ownerRevenue = paidBookings.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0));
 
@@ -1909,12 +1912,14 @@ public static class AdminEndpoints
             {
                 var dayBookingIds = g.Select(p => p.BookingId).ToList();
                 var dayBookings = paidBookings.Where(b => dayBookingIds.Contains(b.Id)).ToList();
+                var dayPlatformFee = dayBookings.Sum(b => b.PlatformFee ?? 0);
                 return new 
                 { 
                     date = g.Key, 
                     totalRevenue = dayBookings.Sum(b => b.TotalAmount),
                     protectionRevenue = dayBookings.Sum(b => b.ProtectionAmount ?? 0),
-                    platformFeeRevenue = dayBookings.Sum(b => b.PlatformFee ?? 0),
+                    platformFeeRevenue = dayPlatformFee,
+                    adminPlatformRevenue = dayPlatformFee * 2,
                     insuranceRevenue = dayBookings.Sum(b => b.InsuranceAmount ?? 0),
                     ownerRevenue = dayBookings.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0)),
                     bookings = dayBookings.Count
@@ -1930,13 +1935,15 @@ public static class AdminEndpoints
             {
                 var monthBookingIds = g.Select(p => p.BookingId).ToList();
                 var monthBookings = paidBookings.Where(b => monthBookingIds.Contains(b.Id)).ToList();
+                var monthPlatformFee = monthBookings.Sum(b => b.PlatformFee ?? 0);
                 return new 
                 { 
                     year = g.Key.Year, 
                     month = g.Key.Month, 
                     totalRevenue = monthBookings.Sum(b => b.TotalAmount),
                     protectionRevenue = monthBookings.Sum(b => b.ProtectionAmount ?? 0),
-                    platformFeeRevenue = monthBookings.Sum(b => b.PlatformFee ?? 0),
+                    platformFeeRevenue = monthPlatformFee,
+                    adminPlatformRevenue = monthPlatformFee * 2,
                     insuranceRevenue = monthBookings.Sum(b => b.InsuranceAmount ?? 0),
                     ownerRevenue = monthBookings.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0)),
                     bookings = monthBookings.Count
@@ -1981,9 +1988,10 @@ public static class AdminEndpoints
         var forecastBookings = await db.Bookings
             .Where(b => b.Status == "confirmed" || b.Status == "active")
             .ToListAsync();
-
+        
         var expectedRevenue = forecastBookings.Sum(b => b.TotalAmount);
-        var expectedPlatformRevenue = forecastBookings.Sum(b => (b.ProtectionAmount ?? 0) + (b.PlatformFee ?? 0) + (b.InsuranceAmount ?? 0));
+        var expectedPlatformFee = forecastBookings.Sum(b => b.PlatformFee ?? 0);
+        var expectedPlatformRevenue = forecastBookings.Sum(b => (b.ProtectionAmount ?? 0) + (b.InsuranceAmount ?? 0)) + (expectedPlatformFee * 2);
         var expectedOwnerRevenue = forecastBookings.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0));
 
         return Results.Ok(new
@@ -1992,10 +2000,11 @@ public static class AdminEndpoints
             summary = new 
             {
                 totalRevenue,
-                protectionPlanRevenue, // Platform keeps this
-                platformFeeRevenue, // Platform fee
-                insuranceRevenue, // Insurance revenue
-                ownerRevenue, // Amount owed to owners
+                protectionPlanRevenue,
+                platformFeeRevenue,
+                adminPlatformRevenue, // Admin earns double (charged to both renter and owner)
+                insuranceRevenue,
+                ownerRevenue, // Amount owed to owners (rental + driver - platform fee)
                 totalBookings,
                 avgRevenuePerBooking
             },
@@ -2016,14 +2025,10 @@ public static class AdminEndpoints
                 expectedRevenue,
                 expectedPlatformRevenue,
                 expectedOwnerRevenue,
-                pendingBookings = forecastBookings.Count,
-                note = "Based on confirmed and active bookings"
+                upcomingBookings = forecastBookings.Count
             },
-            breakdown = new
-            {
-                revenueByDay,
-                revenueByMonth
-            }
+            byDay = revenueByDay,
+            byMonth = revenueByMonth
         });
     }
 
