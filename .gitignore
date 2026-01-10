@@ -17,6 +17,7 @@ appsettings.Development.json
 aci-env.json
 appconfigs.json
 deployment-*.json
+env-vars-*.json
 
 # All deployment scripts (contain sensitive keys)
 deploy-*.ps1
