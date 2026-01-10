@@ -31,6 +31,14 @@ run-*.ps1
 # Database backups
 backups/
 
+# Database cleanup and migration scripts
+clear-*.sql
+cleanup-*.sql
+fix-*.sql
+verify-*.sql
+temp_query.sql
+nuclear-*.ps1
+
 # Docker
 containers.json
 
