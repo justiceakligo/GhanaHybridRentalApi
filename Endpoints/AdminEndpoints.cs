@@ -171,7 +171,7 @@ public static class AdminEndpoints
         app.MapPost("/api/v1/admin/owners/{userId:guid}/payout-details/reject", RejectOwnerPayoutMethodAsync)
             .RequireAuthorization("AdminOnly");
 
-        // Partner application management (listing handled in IntegrationPartnerEndpoints.cs)
+        // Regular Partner application management (business partners on website)
         app.MapPost("/api/v1/admin/partner-applications/{partnerId:guid}/approve", ApprovePartnerApplicationAsync)
             .RequireAuthorization("AdminOnly");
         app.MapPost("/api/v1/admin/partner-applications/{partnerId:guid}/reject", RejectPartnerApplicationAsync)
@@ -1875,7 +1875,7 @@ public static class AdminEndpoints
         var fromDate = from ?? DateTime.UtcNow.AddMonths(-1);
         var toDate = to ?? DateTime.UtcNow;
 
-        // Get all paid payments with their bookings
+        // Get all paid payments with their bookings (direct bookings only)
         var paidPayments = await db.PaymentTransactions
             .Include(p => p.Booking)
             .Where(p => p.Type == "payment" 
@@ -1890,19 +1890,38 @@ public static class AdminEndpoints
             .Where(b => bookingIds.Contains(b.Id) && b.PaymentStatus == "paid")
             .ToListAsync();
 
-        var totalRevenue = paidBookings.Sum(b => b.TotalAmount);
+        // Get partner bookings with settled payments only
+        var settledPartnerBookings = await db.Bookings
+            .Where(b => b.PaymentChannel == "partner" 
+                && b.PaymentStatus == "paid"
+                && b.PartnerSettlementStatus == "paid" // Only count settled partner bookings
+                && b.CreatedAt >= fromDate
+                && b.CreatedAt <= toDate)
+            .ToListAsync();
+
+        // Combine direct and settled partner bookings
+        var allBookings = paidBookings.Concat(settledPartnerBookings).ToList();
+
+        var totalRevenue = allBookings.Sum(b => b.TotalAmount);
         
         // Separate platform revenues (admin keeps these)
-        var protectionPlanRevenue = paidBookings.Sum(b => b.ProtectionAmount ?? 0);
-        var platformFeeRevenue = paidBookings.Sum(b => b.PlatformFee ?? 0);
-        var insuranceRevenue = paidBookings.Sum(b => b.InsuranceAmount ?? 0);
-        var depositRevenue = paidBookings.Sum(b => b.DepositAmount);
+        var protectionPlanRevenue = allBookings.Sum(b => b.ProtectionAmount ?? 0);
+        var platformFeeRevenue = allBookings.Sum(b => b.PlatformFee ?? 0);
+        var insuranceRevenue = allBookings.Sum(b => b.InsuranceAmount ?? 0);
+        var depositRevenue = allBookings.Sum(b => b.DepositAmount);
         
         // Admin earns double the platform fee (charged to both renter as service fee and owner as platform fee)
         var adminPlatformRevenue = platformFeeRevenue * 2;
         
         // Owner revenue (rental + driver fees - platform commission)
-        var ownerRevenue = paidBookings.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0));
+        var ownerRevenue = allBookings.Sum(b => b.RentalAmount + (b.DriverAmount ?? 0) - (b.PlatformFee ?? 0));
+
+        // Partner settlements pending (money we're owed but haven't received)
+        var pendingPartnerRevenue = await db.PartnerSettlements
+            .Where(s => s.Status == "pending" 
+                && s.CreatedAt >= fromDate 
+                && s.CreatedAt <= toDate)
+            .SumAsync(s => s.SettlementAmount);
 
         // Group by payment completion date for time series
         var revenueByDay = paidPayments
@@ -1911,7 +1930,7 @@ public static class AdminEndpoints
             .Select(g => 
             {
                 var dayBookingIds = g.Select(p => p.BookingId).ToList();
-                var dayBookings = paidBookings.Where(b => dayBookingIds.Contains(b.Id)).ToList();
+                var dayBookings = allBookings.Where(b => dayBookingIds.Contains(b.Id)).ToList();
                 var dayPlatformFee = dayBookings.Sum(b => b.PlatformFee ?? 0);
                 return new 
                 { 
@@ -1934,7 +1953,7 @@ public static class AdminEndpoints
             .Select(g => 
             {
                 var monthBookingIds = g.Select(p => p.BookingId).ToList();
-                var monthBookings = paidBookings.Where(b => monthBookingIds.Contains(b.Id)).ToList();
+                var monthBookings = allBookings.Where(b => monthBookingIds.Contains(b.Id)).ToList();
                 var monthPlatformFee = monthBookings.Sum(b => b.PlatformFee ?? 0);
                 return new 
                 { 
@@ -1952,7 +1971,7 @@ public static class AdminEndpoints
             .OrderBy(x => x.year).ThenBy(x => x.month)
             .ToList();
 
-        var totalBookings = paidBookings.Count;
+        var totalBookings = allBookings.Count;
         var avgRevenuePerBooking = totalBookings > 0 ? totalRevenue / totalBookings : 0;
 
         // Calculate previous period for trending
@@ -2006,7 +2025,8 @@ public static class AdminEndpoints
                 insuranceRevenue,
                 ownerRevenue, // Amount owed to owners (rental + driver - platform fee)
                 totalBookings,
-                avgRevenuePerBooking
+                avgRevenuePerBooking,
+                pendingPartnerRevenue // Money owed by partners (not yet settled)
             },
             trending = new
             {

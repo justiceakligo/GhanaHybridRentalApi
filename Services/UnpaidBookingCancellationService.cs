@@ -59,11 +59,13 @@ public class UnpaidBookingCancellationService : BackgroundService
         // 1. Status = "pending_payment" (reserved but not paid)
         // 2. PaymentStatus = "unpaid"
         // 3. Created more than 4 hours ago
+        // 4. NOT partner bookings (PaymentChannel != 'partner')
         var expiredBookings = await db.Bookings
             .Include(b => b.Renter)
             .Include(b => b.Vehicle)
             .Where(b => b.Status == "pending_payment" &&
                        b.PaymentStatus == "unpaid" &&
+                       b.PaymentChannel != "partner" && // Exclude partner bookings from auto-cancellation
                        b.CreatedAt < cutoffTime)
             .ToListAsync();
 

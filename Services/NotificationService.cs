@@ -24,6 +24,11 @@ public interface INotificationService
     Task SendBookingCompletedNotificationAsync(Booking booking);
     Task<bool> SendOwnerNotificationAsync(User owner, string subject, string message);
 
+    // IntegrationPartner application emails
+    Task SendIntegrationPartnerApplicationReceivedAsync(Models.IntegrationPartner partner);
+    Task SendIntegrationPartnerApplicationApprovedAsync(Models.IntegrationPartner partner, string apiKey);
+    Task SendIntegrationPartnerApplicationRejectedAsync(string email, string applicationReference, string reason);
+
     // New: create a scheduled or immediate notification job
     Task<Guid> CreateNotificationJobAsync(Models.NotificationJob job);
 
@@ -945,10 +950,23 @@ CREATE INDEX IF NOT EXISTS ""IX_NotificationJobs_ScheduledAt"" ON ""Notification
             { "support_email", "support@ryverental.com" }
         };
 
+        // Check if this is a partner booking
+        var isPartnerBooking = booking.PaymentChannel == "partner" && booking.IntegrationPartnerId.HasValue;
+        string partnerName = "";
+        if (isPartnerBooking)
+        {
+            var partner = await _db.IntegrationPartners.FindAsync(booking.IntegrationPartnerId);
+            partnerName = partner?.Name ?? "our partner";
+            placeholders["partner_name"] = partnerName;
+            placeholders["payment_note"] = $"Payment processed via {partnerName}";
+        }
+
         try
         {
-            var htmlMessage = await _emailTemplateService.RenderTemplateAsync("booking_confirmed", placeholders);
-            var subject = await _emailTemplateService.RenderSubjectAsync("booking_confirmed", placeholders);
+            // Use different template for partner bookings
+            var templateName = isPartnerBooking ? "booking_confirmed_partner" : "booking_confirmed";
+            var htmlMessage = await _emailTemplateService.RenderTemplateAsync(templateName, placeholders);
+            var subject = await _emailTemplateService.RenderSubjectAsync(templateName, placeholders);
 
             if (!string.IsNullOrEmpty(booking.Renter.Phone))
             {
@@ -1702,6 +1720,103 @@ Questions? Contact support@ryverental.com";
         catch
         {
             return "support@ryverental.com";
+        }
+    }
+
+    // IntegrationPartner application notification methods
+    public async Task SendIntegrationPartnerApplicationReceivedAsync(Models.IntegrationPartner partner)
+    {
+        if (partner == null || string.IsNullOrWhiteSpace(partner.Email))
+        {
+            _logger.LogWarning("Cannot send IntegrationPartner application received email: missing partner or email");
+            return;
+        }
+
+        var placeholders = new Dictionary<string, string>
+        {
+            { "contact_person", partner.ContactPerson ?? partner.Name ?? "" },
+            { "business_name", partner.Name ?? "" },
+            { "application_reference", partner.ApplicationReference ?? "" },
+            { "submitted_at", partner.CreatedAt.ToString("yyyy-MM-dd HH:mm:ss") },
+            { "review_time", "2-3 business days" },
+            { "support_email", await GetSupportEmailAsync() }
+        };
+
+        try
+        {
+            var htmlMessage = await _emailTemplateService.RenderTemplateAsync("integration_partner_application_received", placeholders);
+            var subject = await _emailTemplateService.RenderSubjectAsync("integration_partner_application_received", placeholders);
+
+            await _emailService.SendEmailAsync(partner.Email, subject, htmlMessage);
+            _logger.LogInformation("Sent IntegrationPartner application received email to {Email} (Ref: {Ref})", partner.Email, partner.ApplicationReference);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send IntegrationPartner application received email to {Email}", partner.Email);
+        }
+    }
+
+    public async Task SendIntegrationPartnerApplicationApprovedAsync(Models.IntegrationPartner partner, string apiKey)
+    {
+        if (partner == null || string.IsNullOrWhiteSpace(partner.Email))
+        {
+            _logger.LogWarning("Cannot send IntegrationPartner approved email: missing partner or email");
+            return;
+        }
+
+        var expires = partner.ApiKeyExpiresAt.HasValue ? partner.ApiKeyExpiresAt.Value.ToString("yyyy-MM-dd HH:mm:ss 'UTC'") : "Never";
+
+        var placeholders = new Dictionary<string, string>
+        {
+            { "contact_person", partner.ContactPerson ?? partner.Name ?? "" },
+            { "business_name", partner.Name ?? "" },
+            { "application_reference", partner.ApplicationReference ?? "" },
+            { "api_key", apiKey ?? "" },
+            { "api_key_expires_at", expires },
+            { "docs_url", "https://docs.ryverental.info" },
+            { "support_email", await GetSupportEmailAsync() }
+        };
+
+        try
+        {
+            var htmlMessage = await _emailTemplateService.RenderTemplateAsync("integration_partner_application_approved", placeholders);
+            var subject = await _emailTemplateService.RenderSubjectAsync("integration_partner_application_approved", placeholders);
+
+            await _emailService.SendEmailAsync(partner.Email, subject, htmlMessage);
+            _logger.LogInformation("Sent IntegrationPartner approval email to {Email} (Ref: {Ref})", partner.Email, partner.ApplicationReference);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send IntegrationPartner approval email to {Email}", partner.Email);
+        }
+    }
+
+    public async Task SendIntegrationPartnerApplicationRejectedAsync(string email, string applicationReference, string reason)
+    {
+        if (string.IsNullOrWhiteSpace(email))
+        {
+            _logger.LogWarning("Cannot send IntegrationPartner rejection email: missing email");
+            return;
+        }
+
+        var placeholders = new Dictionary<string, string>
+        {
+            { "application_reference", applicationReference ?? "" },
+            { "rejection_reason", reason ?? "" },
+            { "support_email", await GetSupportEmailAsync() }
+        };
+
+        try
+        {
+            var htmlMessage = await _emailTemplateService.RenderTemplateAsync("integration_partner_application_rejected", placeholders);
+            var subject = await _emailTemplateService.RenderSubjectAsync("integration_partner_application_rejected", placeholders);
+
+            await _emailService.SendEmailAsync(email, subject, htmlMessage);
+            _logger.LogInformation("Sent IntegrationPartner rejection email to {Email} (Ref: {Ref})", email, applicationReference);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send IntegrationPartner rejection email to {Email}", email);
         }
     }
     

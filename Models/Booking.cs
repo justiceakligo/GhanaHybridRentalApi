@@ -48,8 +48,16 @@ public class Booking
     [MaxLength(32)]
     public string PaymentStatus { get; set; } = "unpaid"; // unpaid, paid, refunded, partial_refund
 
+    [MaxLength(32)]
+    public string PaymentChannel { get; set; } = "direct"; // direct (customer pays us), partner (customer pays partner)
+
     [MaxLength(16)]
     public string PaymentMethod { get; set; } = "momo"; // momo, card
+
+    // Partner booking fields
+    public Guid? IntegrationPartnerId { get; set; }
+    [MaxLength(32)]
+    public string? PartnerSettlementStatus { get; set; } // null (direct booking), pending, paid, overdue
 
     public Guid? InsurancePlanId { get; set; }
     public decimal? InsuranceAmount { get; set; }
@@ -102,4 +110,5 @@ public class Booking
     public ProtectionPlan? ProtectionPlan { get; set; }
     public PaymentTransaction? PaymentTransaction { get; set; }
     public PromoCode? PromoCode { get; set; }
+    public IntegrationPartner? IntegrationPartner { get; set; }
 }

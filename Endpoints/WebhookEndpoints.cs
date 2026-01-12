@@ -25,6 +25,10 @@ public static class WebhookEndpoints
 
         app.MapGet("/api/v1/partner/vehicles", GetAvailableVehiclesForPartnerAsync);
 
+        app.MapGet("/api/v1/partner/protection-plans", GetProtectionPlansForPartnerAsync);
+
+        app.MapPost("/api/v1/partner/validate-promo", ValidatePromoCodeForPartnerAsync);
+
         // Payment provider webhook endpoints
         app.MapPost("/api/v1/webhooks/stripe", StripeWebhookAsync);
         
@@ -40,14 +44,10 @@ public static class WebhookEndpoints
     {
         // Verify webhook authenticity
         var apiKey = context.Request.Headers["X-API-Key"].FirstOrDefault();
-        if (string.IsNullOrWhiteSpace(apiKey))
-            return Results.Unauthorized();
-
-        var partner = await db.IntegrationPartners
-            .FirstOrDefaultAsync(p => p.ApiKey == apiKey && p.Active);
-
-        if (partner is null)
-            return Results.Unauthorized();
+        var (isValid, partner, errorMessage) = await PartnerAuthHelper.ValidatePartnerApiKeyAsync(apiKey, db);
+        
+        if (!isValid || partner is null)
+            return Results.Json(new { error = errorMessage ?? "Unauthorized" }, statusCode: 401);
 
         // Process the notification (e.g., send to partner's webhook URL)
         if (!string.IsNullOrWhiteSpace(partner.WebhookUrl))
@@ -56,9 +56,6 @@ public static class WebhookEndpoints
             // For now, just log it
             Console.WriteLine($"Webhook to {partner.Name}: {notification.Event}");
         }
-
-        partner.LastUsedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync();
 
         return Results.Ok(new { message = "Webhook received" });
     }
@@ -69,22 +66,15 @@ public static class WebhookEndpoints
         HttpContext context)
     {
         var apiKey = context.Request.Headers["X-API-Key"].FirstOrDefault();
-        if (string.IsNullOrWhiteSpace(apiKey))
-            return Results.Unauthorized();
-
-        var partner = await db.IntegrationPartners
-            .FirstOrDefaultAsync(p => p.ApiKey == apiKey && p.Active);
-
-        if (partner is null)
-            return Results.Unauthorized();
+        var (isValid, partner, errorMessage) = await PartnerAuthHelper.ValidatePartnerApiKeyAsync(apiKey, db);
+        
+        if (!isValid || partner is null)
+            return Results.Json(new { error = errorMessage ?? "Unauthorized" }, statusCode: 401);
 
         if (!string.IsNullOrWhiteSpace(partner.WebhookUrl))
         {
             Console.WriteLine($"Booking completed webhook to {partner.Name}");
         }
-
-        partner.LastUsedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync();
 
         return Results.Ok(new { message = "Webhook received" });
     }
@@ -95,22 +85,15 @@ public static class WebhookEndpoints
         HttpContext context)
     {
         var apiKey = context.Request.Headers["X-API-Key"].FirstOrDefault();
-        if (string.IsNullOrWhiteSpace(apiKey))
-            return Results.Unauthorized();
-
-        var partner = await db.IntegrationPartners
-            .FirstOrDefaultAsync(p => p.ApiKey == apiKey && p.Active);
-
-        if (partner is null)
-            return Results.Unauthorized();
+        var (isValid, partner, errorMessage) = await PartnerAuthHelper.ValidatePartnerApiKeyAsync(apiKey, db);
+        
+        if (!isValid || partner is null)
+            return Results.Json(new { error = errorMessage ?? "Unauthorized" }, statusCode: 401);
 
         if (!string.IsNullOrWhiteSpace(partner.WebhookUrl))
         {
             Console.WriteLine($"Booking cancelled webhook to {partner.Name}");
         }
-
-        partner.LastUsedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync();
 
         return Results.Ok(new { message = "Webhook received" });
     }
@@ -121,14 +104,10 @@ public static class WebhookEndpoints
         HttpContext context)
     {
         var apiKey = context.Request.Headers["X-API-Key"].FirstOrDefault();
-        if (string.IsNullOrWhiteSpace(apiKey))
-            return Results.Unauthorized();
-
-        var partner = await db.IntegrationPartners
-            .FirstOrDefaultAsync(p => p.ApiKey == apiKey && p.Active);
-
-        if (partner is null)
-            return Results.Unauthorized();
+        var (isValid, partner, errorMessage) = await PartnerAuthHelper.ValidatePartnerApiKeyAsync(apiKey, db);
+        
+        if (!isValid || partner is null)
+            return Results.Json(new { error = errorMessage ?? "Unauthorized" }, statusCode: 401);
 
         // Validate vehicle availability
         var vehicle = await db.Vehicles
@@ -191,7 +170,7 @@ public static class WebhookEndpoints
             }
         }
 
-        // Calculate pricing
+        // Calculate pricing (same logic as direct bookings)
         var totalDays = (request.ReturnDateTime.Date - request.PickupDateTime.Date).TotalDays;
         if (totalDays < 1) totalDays = 1;
 
@@ -203,37 +182,326 @@ public static class WebhookEndpoints
         var rentalAmount = dailyRate * (decimal)totalDays;
         var depositAmount = vehicle.Category.DefaultDepositAmount;
 
+        // Driver amount (optional)
+        decimal? driverAmount = null;
+        if (request.WithDriver)
+        {
+            var driverDailyRate = await db.GlobalSettings
+                .Where(s => s.Key == "DriverDailyRate")
+                .Select(s => s.ValueJson)
+                .FirstOrDefaultAsync();
+            
+            if (!string.IsNullOrWhiteSpace(driverDailyRate))
+            {
+                try 
+                { 
+                    var rate = JsonSerializer.Deserialize<decimal>(driverDailyRate);
+                    driverAmount = rate * (decimal)totalDays;
+                } 
+                catch { driverAmount = 150m * (decimal)totalDays; } // Default 150 GHS/day
+            }
+            else
+            {
+                driverAmount = 150m * (decimal)totalDays; // Default 150 GHS/day
+            }
+        }
+
+        // Protection plan handling (mandatory, same as direct bookings)
+        ProtectionPlan? protectionPlan = null;
+        decimal? protectionAmount = null;
+
+        if (request.ProtectionPlanId.HasValue)
+        {
+            protectionPlan = await db.ProtectionPlans.FirstOrDefaultAsync(p => p.Id == request.ProtectionPlanId.Value && p.IsActive);
+        }
+        else
+        {
+            // If not specified, use default protection plan
+            protectionPlan = await db.ProtectionPlans.FirstOrDefaultAsync(p => p.IsActive && p.IsDefault);
+        }
+
+        if (protectionPlan is null)
+            return Results.BadRequest(new { error = "Protection plan is required. Please select a valid protection plan." });
+
+        if (protectionPlan.PricingMode == "per_day")
+        {
+            protectionAmount = protectionPlan.DailyPrice * (decimal)totalDays;
+        }
+        else
+        {
+            protectionAmount = protectionPlan.FixedPrice;
+        }
+
+        protectionAmount = Math.Max(protectionPlan.MinFee, Math.Min(protectionAmount.Value, protectionPlan.MaxFee));
+
+        // Get platform fee percentage from GlobalSettings (default 15%)
+        decimal platformFeePercentage = 15.0m;
+        var platformFeeSetting = await db.GlobalSettings
+            .FirstOrDefaultAsync(s => s.Key == "PlatformFeePercentage");
+        if (platformFeeSetting != null)
+        {
+            try { platformFeePercentage = JsonSerializer.Deserialize<decimal>(platformFeeSetting.ValueJson); } catch { }
+        }
+
+        // Calculate platform fee (on rental amount + driver amount, same as direct bookings)
+        var subtotal = rentalAmount + (driverAmount ?? 0m);
+        var platformFee = subtotal * (platformFeePercentage / 100m);
+
+        // Total amount includes all fees (same calculation as direct bookings)
+        var totalAmount = rentalAmount + depositAmount + (driverAmount ?? 0m) + (protectionAmount ?? 0m) + platformFee;
+
+        // Apply promo code if provided (same logic as direct bookings)
+        Guid? promoCodeId = null;
+        decimal promoDiscountAmount = 0m;
+
+        if (!string.IsNullOrWhiteSpace(request.PromoCode))
+        {
+            var promoCodeService = context.RequestServices.GetRequiredService<IPromoCodeService>();
+            try
+            {
+                var categoryId = vehicle.CategoryId;
+                var cityId = vehicle.CityId;
+                
+                var validationRequest = new Dtos.ValidatePromoCodeDto(
+                    request.PromoCode,
+                    totalAmount,
+                    vehicle.Id,
+                    categoryId,
+                    cityId,
+                    (int)totalDays
+                );
+
+                var validation = await promoCodeService.ValidatePromoCodeAsync(request.PromoCode, renterUser.Id, validationRequest);
+
+                if (validation.IsValid && validation.PromoCode != null)
+                {
+                    promoDiscountAmount = validation.DiscountAmount;
+                    promoCodeId = validation.PromoCode.Id;
+
+                    // For owner vehicle discounts, reduce rental amount (owner earns less)
+                    // For regular discounts, reduce total amount (renter pays less)
+                    if (validation.PromoCode.PromoType == "OwnerVehicleDiscount")
+                    {
+                        rentalAmount -= promoDiscountAmount;
+                        // Recalculate subtotal and fees
+                        subtotal = rentalAmount + (driverAmount ?? 0m);
+                        platformFee = subtotal * (platformFeePercentage / 100m);
+                        totalAmount = rentalAmount + depositAmount + (driverAmount ?? 0m) + (protectionAmount ?? 0m) + platformFee;
+                    }
+                    else
+                    {
+                        // Regular promo - reduce total amount
+                        totalAmount = validation.FinalAmount;
+                    }
+                }
+                else
+                {
+                    // Return error if promo code is invalid
+                    return Results.BadRequest(new { error = $"Promo code error: {validation.ErrorMessage}" });
+                }
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = $"Failed to apply promo code: {ex.Message}" });
+            }
+        }
+
+        // Calculate partner commission and settlement (after promo code discount)
+        var commissionPercent = partner.CommissionPercent;
+        var commissionAmount = Math.Round(totalAmount * (commissionPercent / 100), 2);
+        var settlementAmount = totalAmount - commissionAmount;
+
+        // Generate unique booking reference
+        var bookingReference = $"RV-{DateTime.UtcNow.Year}-{Guid.NewGuid().ToString("N")[..8].ToUpper()}";
+
         var booking = new Booking
         {
+            BookingReference = bookingReference,
             RenterId = renterUser.Id,
             VehicleId = vehicle.Id,
             OwnerId = vehicle.OwnerId,
             PickupDateTime = request.PickupDateTime,
             ReturnDateTime = request.ReturnDateTime,
             WithDriver = request.WithDriver,
+            DriverAmount = driverAmount,
+            ProtectionPlanId = protectionPlan.Id,
+            ProtectionAmount = protectionAmount,
+            ProtectionSnapshotJson = JsonSerializer.Serialize(new 
+            { 
+                protectionPlan.Code, 
+                protectionPlan.Name, 
+                protectionPlan.DailyPrice, 
+                protectionPlan.FixedPrice, 
+                protectionPlan.MinFee, 
+                protectionPlan.MaxFee, 
+                protectionPlan.IncludesMinorDamageWaiver, 
+                protectionPlan.MinorWaiverCap, 
+                protectionPlan.Deductible, 
+                protectionPlan.ExcludesJson 
+            }),
             Currency = "GHS",
             RentalAmount = rentalAmount,
             DepositAmount = depositAmount,
-            TotalAmount = rentalAmount + depositAmount,
+            PlatformFee = platformFee,
+            PromoCodeId = promoCodeId,
+            PromoDiscountAmount = promoDiscountAmount,
+            TotalAmount = totalAmount,
             PaymentMethod = request.PaymentMethod.ToLowerInvariant(),
-            Status = "confirmed", // Partner bookings are pre-confirmed
-            PaymentStatus = "paid" // Assume partner handles payment
+            PaymentChannel = "partner", // Mark as partner booking
+            Status = partner.AutoConfirmBookings ? "confirmed" : "pending", 
+            PaymentStatus = "paid", // Customer paid partner
+            IntegrationPartnerId = partner.Id,
+            PartnerSettlementStatus = "pending" // Partner hasn't paid us yet
         };
 
         db.Bookings.Add(booking);
-        partner.LastUsedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(); // Save to get booking.Id
+
+        // Create settlement record
+        var settlementDueDate = DateTime.UtcNow.AddDays(partner.SettlementTermDays);
+        var settlement = new PartnerSettlement
+        {
+            IntegrationPartnerId = partner.Id,
+            BookingId = booking.Id,
+            BookingReference = bookingReference,
+            SettlementPeriodStart = booking.CreatedAt,
+            SettlementPeriodEnd = booking.ReturnDateTime,
+            TotalAmount = totalAmount,
+            CommissionPercent = commissionPercent,
+            CommissionAmount = commissionAmount,
+            SettlementAmount = settlementAmount,
+            Status = "pending",
+            DueDate = settlementDueDate
+        };
+
+        db.PartnerSettlements.Add(settlement);
         await db.SaveChangesAsync();
 
         return Results.Created($"/api/v1/bookings/{booking.Id}", new
         {
             booking.Id,
+            bookingReference = booking.BookingReference,
             booking.RenterId,
             booking.VehicleId,
             booking.Status,
+            booking.PaymentStatus,
             booking.TotalAmount,
             booking.PickupDateTime,
-            booking.ReturnDateTime
+            booking.ReturnDateTime,
+            partner = new
+            {
+                commissionPercent,
+                commissionAmount,
+                settlementAmount,
+                settlementDueDate
+            }
         });
+    }
+
+    private static async Task<IResult> GetProtectionPlansForPartnerAsync(
+        AppDbContext db,
+        HttpContext context)
+    {
+        var apiKey = context.Request.Headers["X-API-Key"].FirstOrDefault();
+        var (isValid, partner, errorMessage) = await PartnerAuthHelper.ValidatePartnerApiKeyAsync(apiKey, db);
+        
+        if (!isValid || partner is null)
+            return Results.Json(new { error = errorMessage ?? "Unauthorized" }, statusCode: 401);
+
+        var protectionPlans = await db.ProtectionPlans
+            .Where(p => p.IsActive)
+            .OrderBy(p => p.DailyPrice)
+            .ToListAsync();
+
+        return Results.Ok(protectionPlans.Select(p => new
+        {
+            p.Id,
+            p.Code,
+            p.Name,
+            p.Description,
+            p.PricingMode,
+            p.DailyPrice,
+            p.FixedPrice,
+            p.MinFee,
+            p.MaxFee,
+            p.Currency,
+            p.IncludesMinorDamageWaiver,
+            p.MinorWaiverCap,
+            p.Deductible,
+            exclusions = string.IsNullOrWhiteSpace(p.ExcludesJson)
+                ? new List<string>()
+                : JsonSerializer.Deserialize<List<string>>(p.ExcludesJson),
+            p.IsMandatory,
+            p.IsDefault
+        }));
+    }
+
+    private static async Task<IResult> ValidatePromoCodeForPartnerAsync(
+        [FromBody] PartnerPromoValidationRequest request,
+        AppDbContext db,
+        HttpContext context)
+    {
+        var apiKey = context.Request.Headers["X-API-Key"].FirstOrDefault();
+        var (isValid, partner, errorMessage) = await PartnerAuthHelper.ValidatePartnerApiKeyAsync(apiKey, db);
+        
+        if (!isValid || partner is null)
+            return Results.Json(new { error = errorMessage ?? "Unauthorized" }, statusCode: 401);
+
+        // Get vehicle details for promo code validation
+        var vehicle = await db.Vehicles
+            .FirstOrDefaultAsync(v => v.Id == request.VehicleId);
+
+        if (vehicle is null)
+            return Results.BadRequest(new { error = "Vehicle not found" });
+
+        var promoCodeService = context.RequestServices.GetRequiredService<IPromoCodeService>();
+
+        try
+        {
+            var validationRequest = new Dtos.ValidatePromoCodeDto(
+                request.PromoCode,
+                request.BookingAmount,
+                vehicle.Id,
+                vehicle.CategoryId,
+                vehicle.CityId,
+                request.RentalDays
+            );
+
+            // Use partner user ID as a placeholder since customer doesn't exist yet
+            var validation = await promoCodeService.ValidatePromoCodeAsync(
+                request.PromoCode, 
+                Guid.Empty, // Will be validated again during actual booking with real user ID
+                validationRequest
+            );
+
+            if (validation.IsValid)
+            {
+                return Results.Ok(new
+                {
+                    isValid = true,
+                    promoCode = validation.PromoCode?.Code,
+                    promoType = validation.PromoCode?.PromoType,
+                    discountType = validation.PromoCode?.PromoType,
+                    discountAmount = validation.DiscountAmount,
+                    originalAmount = validation.OriginalAmount,
+                    finalAmount = validation.FinalAmount,
+                    message = validation.ErrorMessage
+                });
+            }
+            else
+            {
+                return Results.Ok(new
+                {
+                    isValid = false,
+                    error = validation.ErrorMessage
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error validating promo code for partner: {ex.Message}");
+            return Results.BadRequest(new { error = $"Failed to validate promo code: {ex.Message}" });
+        }
     }
 
     private static async Task<IResult> GetAvailableVehiclesForPartnerAsync(
@@ -245,14 +513,10 @@ public static class WebhookEndpoints
         [FromQuery] Guid? cityId) // Changed from string to Guid
     {
         var apiKey = context.Request.Headers["X-API-Key"].FirstOrDefault();
-        if (string.IsNullOrWhiteSpace(apiKey))
-            return Results.Unauthorized();
-
-        var partner = await db.IntegrationPartners
-            .FirstOrDefaultAsync(p => p.ApiKey == apiKey && p.Active);
-
-        if (partner is null)
-            return Results.Unauthorized();
+        var (isValid, partner, errorMessage) = await PartnerAuthHelper.ValidatePartnerApiKeyAsync(apiKey, db);
+        
+        if (!isValid || partner is null)
+            return Results.Json(new { error = errorMessage ?? "Unauthorized" }, statusCode: 401);
 
         var query = db.Vehicles
             .Include(v => v.Category)
@@ -280,9 +544,6 @@ public static class WebhookEndpoints
         }
 
         var vehicles = await query.ToListAsync();
-
-        partner.LastUsedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync();
 
         return Results.Ok(vehicles.Select(v => new
         {
@@ -667,5 +928,46 @@ public record PartnerBookingRequest(
     string RenterEmail,
     string? RenterPhone,
     string RenterName,
-    string PaymentMethod
+    string PaymentMethod,
+    Guid? ProtectionPlanId,  // Optional - will use default if not provided
+    string? PromoCode        // Optional - promo code for discount
 );
+
+public record PartnerPromoValidationRequest(
+    string PromoCode,
+    Guid VehicleId,
+    decimal BookingAmount,
+    int RentalDays
+);
+
+// Helper method to validate partner API key with expiry checking
+static class PartnerAuthHelper
+{
+    public static async Task<(bool isValid, IntegrationPartner? partner, string? errorMessage)> ValidatePartnerApiKeyAsync(
+        string? apiKey, 
+        AppDbContext db)
+    {
+        if (string.IsNullOrWhiteSpace(apiKey))
+            return (false, null, "API key is required");
+
+        var partner = await db.IntegrationPartners
+            .FirstOrDefaultAsync(p => p.ApiKey == apiKey);
+
+        if (partner is null)
+            return (false, null, "Invalid API key");
+
+        if (!partner.Active)
+            return (false, null, "Partner account is not active");
+
+        // Check API key expiry
+        if (partner.ApiKeyExpiresAt.HasValue && partner.ApiKeyExpiresAt.Value < DateTime.UtcNow)
+            return (false, null, $"API key expired on {partner.ApiKeyExpiresAt.Value:yyyy-MM-dd}. Please contact support to renew.");
+
+        // Update last used timestamp
+        partner.LastUsedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync();
+
+        return (true, partner, null);
+    }
+}
+

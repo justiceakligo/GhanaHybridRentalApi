@@ -54,7 +54,45 @@ public record IntegrationPartnerResponse(
     string? WebhookUrl,
     bool Active,
     DateTime CreatedAt,
-    DateTime? LastUsedAt
+    DateTime? LastUsedAt,
+    DateTime? ApiKeyExpiresAt,
+    string? ContactPerson,
+    string? Email,
+    string? Phone,
+    string? Website,
+    string? ApplicationReference,
+    decimal CommissionPercent,
+    int SettlementTermDays
+);
+
+// Partner Application DTOs (public submission)
+public record PartnerApplicationRequest(
+    string BusinessName,
+    string BusinessType, // hotel, travel_agency, ota, tour_operator, car_rental, custom
+    string ContactPerson,
+    string Email,
+    string Phone,
+    string? Website,
+    string? RegistrationNumber,
+    string Description,
+    string? WebhookUrl
+);
+
+public record PartnerApplicationResponse(
+    Guid Id,
+    string ApplicationReference,
+    string BusinessName,
+    string Status, // pending, approved, rejected
+    DateTime SubmittedAt,
+    string Message
+);
+
+public record SetApiKeyExpiryRequest(
+    DateTime? ExpiresAt // null = no expiry
+);
+
+public record RenewApiKeyRequest(
+    int? ExpiryDays // null = no expiry, else days from now
 );
 
 // Payment DTOs

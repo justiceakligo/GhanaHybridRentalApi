@@ -1,0 +1,880 @@
+openapi: 3.0.3
+info:
+  title: RyveRental Partner API
+  description: |
+    Partner API for integrating RyveRental vehicle rental services into third-party platforms.
+    
+    ## Getting Started
+    1. Apply for partnership at https://dashboard.ryverental.com/partners
+    2. Receive API key after approval
+    3. Use API key in X-API-Key header for all requests
+    4. Test integration in sandbox environment
+    5. Go live with production credentials
+    
+    ## Base URLs
+    - **Production:** https://ryverental.info
+    - **Sandbox:** Contact partner support
+    
+    ## Authentication
+    All endpoints require API key authentication via X-API-Key header.
+    
+    ## Support
+    - Email: partners@ryverental.com
+    - Phone: +233 XX XXX XXXX
+    - Documentation: https://docs.ryverental.com/partners
+  version: 1.0.0
+  contact:
+    name: RyveRental Partner Support
+    email: partners@ryverental.com
+    url: https://ryverental.com
+  license:
+    name: Proprietary
+    url: https://ryverental.com/terms
+
+servers:
+  - url: https://ryverental.info
+    description: Production server
+  - url: https://sandbox.ryverental.info
+    description: Sandbox server (contact support for access)
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: Vehicles
+    description: Vehicle inventory and availability
+  - name: Protection Plans
+    description: Mandatory vehicle protection plans
+  - name: Promo Codes
+    description: Discount code validation
+  - name: Bookings
+    description: Create and manage bookings
+  - name: Webhooks
+    description: Event notifications
+
+paths:
+  /api/v1/partner/vehicles:
+    get:
+      tags:
+        - Vehicles
+      summary: Get available vehicles
+      description: |
+        Retrieve a list of vehicles available for rental. Optionally filter by dates, 
+        category, or city to show only vehicles available for specific criteria.
+        
+        **Caching:** Results can be cached for 5-15 minutes to improve performance.
+      operationId: getAvailableVehicles
+      parameters:
+        - name: startDate
+          in: query
+          description: Rental start date/time (ISO 8601 format)
+          required: false
+          schema:
+            type: string
+            format: date-time
+          example: "2026-01-20T10:00:00Z"
+        - name: endDate
+          in: query
+          description: Rental end date/time (ISO 8601 format)
+          required: false
+          schema:
+            type: string
+            format: date-time
+          example: "2026-01-25T10:00:00Z"
+        - name: categoryId
+          in: query
+          description: Filter by vehicle category ID
+          required: false
+          schema:
+            type: string
+            format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        - name: cityId
+          in: query
+          description: Filter by city ID
+          required: false
+          schema:
+            type: string
+            format: uuid
+          example: "987fcdeb-51a2-43d1-b567-890123456789"
+      responses:
+        '200':
+          description: List of available vehicles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Vehicle'
+              examples:
+                success:
+                  summary: Successful response
+                  value:
+                    - id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                      make: "Toyota"
+                      model: "Corolla"
+                      year: 2023
+                      transmission: "Automatic"
+                      fuelType: "Petrol"
+                      seatingCapacity: 5
+                      hasAC: true
+                      cityId: "123e4567-e89b-12d3-a456-426614174000"
+                      category:
+                        name: "Economy"
+                        defaultDailyRate: 150.00
+                        defaultDepositAmount: 500.00
+                      photos:
+                        - "https://ryverental.blob.core.windows.net/vehicles/toyota-corolla-1.jpg"
+                        - "https://ryverental.blob.core.windows.net/vehicles/toyota-corolla-2.jpg"
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /api/v1/partner/protection-plans:
+    get:
+      tags:
+        - Protection Plans
+      summary: Get protection plans
+      description: |
+        Retrieve all active protection plans. Protection plans are **mandatory** for 
+        all bookings and provide damage coverage for rentals.
+        
+        **Caching:** Results can be cached for up to 1 hour.
+      operationId: getProtectionPlans
+      responses:
+        '200':
+          description: List of protection plans
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProtectionPlan'
+              examples:
+                success:
+                  summary: Successful response
+                  value:
+                    - id: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+                      code: "BASIC"
+                      name: "Basic Protection"
+                      description: "Covers basic damages up to GHS 5,000"
+                      pricingMode: "per_day"
+                      dailyPrice: 25.00
+                      fixedPrice: 0.00
+                      minFee: 25.00
+                      maxFee: 200.00
+                      currency: "GHS"
+                      includesMinorDamageWaiver: true
+                      minorWaiverCap: 1000.00
+                      deductible: 500.00
+                      exclusions: ["theft", "total_loss"]
+                      isMandatory: true
+                      isDefault: true
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /api/v1/partner/validate-promo:
+    post:
+      tags:
+        - Promo Codes
+      summary: Validate promo code
+      description: |
+        Validate a promo code before creating a booking. This allows you to show 
+        the discount amount to customers during checkout.
+        
+        **Note:** Promo code will be validated again during booking creation to 
+        prevent abuse. Always use the result from booking creation for final pricing.
+      operationId: validatePromoCode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PromoValidationRequest'
+            examples:
+              validPromo:
+                summary: Validate a promo code
+                value:
+                  promoCode: "SUMMER2026"
+                  vehicleId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                  bookingAmount: 1500.00
+                  rentalDays: 5
+      responses:
+        '200':
+          description: Promo code validation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PromoValidationResponse'
+              examples:
+                valid:
+                  summary: Valid promo code
+                  value:
+                    isValid: true
+                    promoCode: "SUMMER2026"
+                    promoType: "RenterDiscount"
+                    discountType: "Percentage"
+                    discountAmount: 150.00
+                    originalAmount: 1500.00
+                    finalAmount: 1350.00
+                    message: "10% discount applied"
+                invalid:
+                  summary: Invalid promo code
+                  value:
+                    isValid: false
+                    error: "Promo code has expired"
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /api/v1/partner/bookings:
+    post:
+      tags:
+        - Bookings
+      summary: Create booking
+      description: |
+        Create a new booking after collecting payment from the customer.
+        
+        **Important:**
+        - Customer must have already paid you
+        - You will owe RyveRental (total - commission)
+        - Settlement invoice sent monthly
+        - Booking is marked as "paid" since customer paid partner
+        
+        **Calculation:**
+        1. Daily Rate × Days = Rental Amount
+        2. Protection Plan × Days = Protection Amount  
+        3. Platform Fee = (Rental + Driver) × 15%
+        4. Total = Rental + Deposit + Driver + Protection + Platform Fee
+        5. Apply promo discount if provided
+        6. Your Commission = Total × Commission %
+        7. You Owe = Total - Commission
+      operationId: createBooking
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookingRequest'
+            examples:
+              basicBooking:
+                summary: Basic booking without driver
+                value:
+                  vehicleId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                  pickupDateTime: "2026-01-20T10:00:00Z"
+                  returnDateTime: "2026-01-25T10:00:00Z"
+                  withDriver: false
+                  renterEmail: "customer@example.com"
+                  renterPhone: "+233 XX XXX XXXX"
+                  renterName: "Jane Doe"
+                  paymentMethod: "card"
+                  protectionPlanId: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+              withPromo:
+                summary: Booking with promo code
+                value:
+                  vehicleId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                  pickupDateTime: "2026-01-20T10:00:00Z"
+                  returnDateTime: "2026-01-25T10:00:00Z"
+                  withDriver: false
+                  renterEmail: "customer@example.com"
+                  renterPhone: "+233 XX XXX XXXX"
+                  renterName: "Jane Doe"
+                  paymentMethod: "card"
+                  protectionPlanId: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+                  promoCode: "SUMMER2026"
+              withDriver:
+                summary: Booking with driver
+                value:
+                  vehicleId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                  pickupDateTime: "2026-01-20T10:00:00Z"
+                  returnDateTime: "2026-01-25T10:00:00Z"
+                  withDriver: true
+                  renterEmail: "customer@example.com"
+                  renterPhone: "+233 XX XXX XXXX"
+                  renterName: "Jane Doe"
+                  paymentMethod: "mobile_money"
+      responses:
+        '201':
+          description: Booking created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingResponse'
+              examples:
+                success:
+                  summary: Successful booking creation
+                  value:
+                    id: "9f8e7d6c-5b4a-3210-9876-543210fedcba"
+                    bookingReference: "RV-2026-A1B2C3D4"
+                    renterId: "1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p"
+                    vehicleId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    status: "confirmed"
+                    paymentStatus: "paid"
+                    totalAmount: 1350.00
+                    pickupDateTime: "2026-01-20T10:00:00Z"
+                    returnDateTime: "2026-01-25T10:00:00Z"
+                    partner:
+                      commissionPercent: 15.00
+                      commissionAmount: 202.50
+                      settlementAmount: 1147.50
+                      settlementDueDate: "2026-02-19T00:00:00Z"
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /api/v1/webhooks/booking-created:
+    post:
+      tags:
+        - Webhooks
+      summary: Booking created webhook
+      description: |
+        RyveRental sends this webhook when a booking is created via partner API.
+        
+        **Setup:** Configure your webhook URL in partner dashboard.
+        
+        **Security:** Verify the X-API-Key header matches your partner API key.
+      operationId: bookingCreatedWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookPayload'
+            example:
+              event: "booking.created"
+              bookingId: "9f8e7d6c-5b4a-3210-9876-543210fedcba"
+              data:
+                bookingReference: "RV-2026-A1B2C3D4"
+                status: "confirmed"
+                totalAmount: 1350.00
+                pickupDateTime: "2026-01-20T10:00:00Z"
+                returnDateTime: "2026-01-25T10:00:00Z"
+                vehicleId: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                renterEmail: "customer@example.com"
+      responses:
+        '200':
+          description: Webhook acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Webhook received"
+
+  /api/v1/webhooks/booking-completed:
+    post:
+      tags:
+        - Webhooks
+      summary: Booking completed webhook
+      description: |
+        RyveRental sends this webhook when a rental period ends and vehicle is returned.
+      operationId: bookingCompletedWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookPayload'
+            example:
+              event: "booking.completed"
+              bookingId: "9f8e7d6c-5b4a-3210-9876-543210fedcba"
+              data:
+                bookingReference: "RV-2026-A1B2C3D4"
+                status: "completed"
+                completedAt: "2026-01-25T14:30:00Z"
+                finalAmount: 1350.00
+      responses:
+        '200':
+          description: Webhook acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Webhook received"
+
+  /api/v1/webhooks/booking-cancelled:
+    post:
+      tags:
+        - Webhooks
+      summary: Booking cancelled webhook
+      description: |
+        RyveRental sends this webhook when a booking is cancelled.
+        
+        **Note:** Partner should refund customer and settlement will be adjusted.
+      operationId: bookingCancelledWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookPayload'
+            example:
+              event: "booking.cancelled"
+              bookingId: "9f8e7d6c-5b4a-3210-9876-543210fedcba"
+              data:
+                bookingReference: "RV-2026-A1B2C3D4"
+                status: "cancelled"
+                cancelledAt: "2026-01-18T09:15:00Z"
+                cancellationReason: "Customer request"
+                refundAmount: 1350.00
+      responses:
+        '200':
+          description: Webhook acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Webhook received"
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        Partner API key for authentication. Obtain from partner dashboard after approval.
+        
+        Example: `X-API-Key: pk_live_1234567890abcdef`
+
+  schemas:
+    Vehicle:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique vehicle identifier
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        make:
+          type: string
+          description: Vehicle manufacturer
+          example: "Toyota"
+        model:
+          type: string
+          description: Vehicle model
+          example: "Corolla"
+        year:
+          type: integer
+          description: Manufacturing year
+          example: 2023
+        transmission:
+          type: string
+          enum: [Automatic, Manual]
+          description: Transmission type
+          example: "Automatic"
+        fuelType:
+          type: string
+          enum: [Petrol, Diesel, Hybrid, Electric]
+          description: Fuel type
+          example: "Petrol"
+        seatingCapacity:
+          type: integer
+          description: Number of passengers
+          example: 5
+        hasAC:
+          type: boolean
+          description: Air conditioning availability
+          example: true
+        cityId:
+          type: string
+          format: uuid
+          description: City where vehicle is located
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        category:
+          type: object
+          properties:
+            name:
+              type: string
+              example: "Economy"
+            defaultDailyRate:
+              type: number
+              format: decimal
+              description: Daily rental rate in GHS
+              example: 150.00
+            defaultDepositAmount:
+              type: number
+              format: decimal
+              description: Security deposit in GHS
+              example: 500.00
+        photos:
+          type: array
+          items:
+            type: string
+            format: uri
+          description: Vehicle photo URLs
+          example:
+            - "https://ryverental.blob.core.windows.net/vehicles/toyota-corolla-1.jpg"
+
+    ProtectionPlan:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+        code:
+          type: string
+          example: "BASIC"
+        name:
+          type: string
+          example: "Basic Protection"
+        description:
+          type: string
+          example: "Covers basic damages up to GHS 5,000"
+        pricingMode:
+          type: string
+          enum: [per_day, fixed]
+          description: How protection fee is calculated
+          example: "per_day"
+        dailyPrice:
+          type: number
+          format: decimal
+          description: Price per day (if pricingMode is per_day)
+          example: 25.00
+        fixedPrice:
+          type: number
+          format: decimal
+          description: Fixed price (if pricingMode is fixed)
+          example: 0.00
+        minFee:
+          type: number
+          format: decimal
+          description: Minimum protection fee
+          example: 25.00
+        maxFee:
+          type: number
+          format: decimal
+          description: Maximum protection fee
+          example: 200.00
+        currency:
+          type: string
+          example: "GHS"
+        includesMinorDamageWaiver:
+          type: boolean
+          description: Covers minor damages without deductible
+          example: true
+        minorWaiverCap:
+          type: number
+          format: decimal
+          description: Maximum amount covered without deductible
+          example: 1000.00
+        deductible:
+          type: number
+          format: decimal
+          description: Amount customer pays before coverage applies
+          example: 500.00
+        exclusions:
+          type: array
+          items:
+            type: string
+          description: What's not covered
+          example: ["theft", "total_loss"]
+        isMandatory:
+          type: boolean
+          description: Whether this plan is required
+          example: true
+        isDefault:
+          type: boolean
+          description: Default plan if none selected
+          example: true
+
+    PromoValidationRequest:
+      type: object
+      required:
+        - promoCode
+        - vehicleId
+        - bookingAmount
+        - rentalDays
+      properties:
+        promoCode:
+          type: string
+          description: Promo code to validate
+          example: "SUMMER2026"
+        vehicleId:
+          type: string
+          format: uuid
+          description: Vehicle being booked
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        bookingAmount:
+          type: number
+          format: decimal
+          description: Total booking amount before discount
+          example: 1500.00
+        rentalDays:
+          type: integer
+          description: Number of rental days
+          example: 5
+
+    PromoValidationResponse:
+      type: object
+      properties:
+        isValid:
+          type: boolean
+          description: Whether promo code is valid
+          example: true
+        promoCode:
+          type: string
+          description: Promo code (if valid)
+          example: "SUMMER2026"
+        promoType:
+          type: string
+          enum: [RenterDiscount, OwnerVehicleDiscount, FirstBooking, Referral]
+          description: Type of promo
+          example: "RenterDiscount"
+        discountType:
+          type: string
+          enum: [Percentage, FixedAmount]
+          description: How discount is calculated
+          example: "Percentage"
+        discountAmount:
+          type: number
+          format: decimal
+          description: Discount amount in GHS
+          example: 150.00
+        originalAmount:
+          type: number
+          format: decimal
+          description: Amount before discount
+          example: 1500.00
+        finalAmount:
+          type: number
+          format: decimal
+          description: Amount after discount
+          example: 1350.00
+        message:
+          type: string
+          description: Human-readable message
+          example: "10% discount applied"
+        error:
+          type: string
+          description: Error message (if invalid)
+          example: "Promo code has expired"
+
+    BookingRequest:
+      type: object
+      required:
+        - vehicleId
+        - pickupDateTime
+        - returnDateTime
+        - withDriver
+        - renterEmail
+        - renterName
+        - paymentMethod
+      properties:
+        vehicleId:
+          type: string
+          format: uuid
+          description: ID of vehicle to book
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        pickupDateTime:
+          type: string
+          format: date-time
+          description: When customer picks up vehicle
+          example: "2026-01-20T10:00:00Z"
+        returnDateTime:
+          type: string
+          format: date-time
+          description: When customer returns vehicle
+          example: "2026-01-25T10:00:00Z"
+        withDriver:
+          type: boolean
+          description: Whether booking includes a driver
+          example: false
+        renterEmail:
+          type: string
+          format: email
+          description: Customer email address
+          example: "customer@example.com"
+        renterPhone:
+          type: string
+          description: Customer phone number
+          example: "+233 XX XXX XXXX"
+        renterName:
+          type: string
+          description: Customer full name
+          example: "Jane Doe"
+        paymentMethod:
+          type: string
+          description: How customer paid partner
+          example: "card"
+        protectionPlanId:
+          type: string
+          format: uuid
+          description: Protection plan ID (uses default if not provided)
+          example: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+        promoCode:
+          type: string
+          description: Promo code for discount (optional)
+          example: "SUMMER2026"
+
+    BookingResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Booking ID
+          example: "9f8e7d6c-5b4a-3210-9876-543210fedcba"
+        bookingReference:
+          type: string
+          description: Human-readable booking reference
+          example: "RV-2026-A1B2C3D4"
+        renterId:
+          type: string
+          format: uuid
+          description: Customer user ID
+          example: "1a2b3c4d-5e6f-7g8h-9i0j-1k2l3m4n5o6p"
+        vehicleId:
+          type: string
+          format: uuid
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        status:
+          type: string
+          enum: [pending, confirmed, active, completed, cancelled]
+          description: Booking status
+          example: "confirmed"
+        paymentStatus:
+          type: string
+          enum: [unpaid, paid, refunded]
+          description: Payment status
+          example: "paid"
+        totalAmount:
+          type: number
+          format: decimal
+          description: Total amount customer paid
+          example: 1350.00
+        pickupDateTime:
+          type: string
+          format: date-time
+          example: "2026-01-20T10:00:00Z"
+        returnDateTime:
+          type: string
+          format: date-time
+          example: "2026-01-25T10:00:00Z"
+        partner:
+          type: object
+          description: Settlement details
+          properties:
+            commissionPercent:
+              type: number
+              format: decimal
+              description: Your commission percentage
+              example: 15.00
+            commissionAmount:
+              type: number
+              format: decimal
+              description: Your earnings (in GHS)
+              example: 202.50
+            settlementAmount:
+              type: number
+              format: decimal
+              description: Amount you owe RyveRental (in GHS)
+              example: 1147.50
+            settlementDueDate:
+              type: string
+              format: date-time
+              description: When settlement payment is due
+              example: "2026-02-19T00:00:00Z"
+
+    WebhookPayload:
+      type: object
+      required:
+        - event
+        - bookingId
+      properties:
+        event:
+          type: string
+          enum: [booking.created, booking.completed, booking.cancelled]
+          description: Event type
+          example: "booking.created"
+        bookingId:
+          type: string
+          format: uuid
+          description: Booking ID
+          example: "9f8e7d6c-5b4a-3210-9876-543210fedcba"
+        data:
+          type: object
+          description: Event-specific data
+          additionalProperties: true
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+          example: "Invalid API key"
+
+  responses:
+    UnauthorizedError:
+      description: API key is missing or invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Invalid API key"
+
+    BadRequestError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            missingField:
+              summary: Missing required field
+              value:
+                error: "RenterEmail and RenterName are required"
+            vehicleUnavailable:
+              summary: Vehicle not available
+              value:
+                error: "Vehicle not available for requested dates"
+            invalidPromo:
+              summary: Invalid promo code
+              value:
+                error: "Promo code error: Code has expired"
+
+    RateLimitError:
+      description: Rate limit exceeded
+      headers:
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+          description: Request limit per minute
+          example: 100
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+          description: Remaining requests
+          example: 0
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+          description: Unix timestamp when limit resets
+          example: 1640995200
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Rate limit exceeded"
+            retryAfter: 60

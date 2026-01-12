@@ -24,6 +24,7 @@ public class AppDbContext : DbContext
     public DbSet<AppConfig> AppConfigs => Set<AppConfig>();
     public DbSet<OtpCode> OtpCodes => Set<OtpCode>();
     public DbSet<IntegrationPartner> IntegrationPartners => Set<IntegrationPartner>();
+    public DbSet<PartnerSettlement> PartnerSettlements => Set<PartnerSettlement>();
     public DbSet<Referral> Referrals => Set<Referral>();
     public DbSet<PaymentTransaction> PaymentTransactions => Set<PaymentTransaction>();
     public DbSet<Payout> Payouts => Set<Payout>();

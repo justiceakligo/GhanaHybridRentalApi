@@ -393,6 +393,7 @@ app.MapProtectionEndpoints();
 app.MapBookingEndpoints();
 app.MapDriverEndpoints();
 app.MapIntegrationPartnerEndpoints();
+app.MapPartnerSettlementEndpoints();
 app.MapPaymentEndpoints();
 app.MapPaymentConfigEndpoints();
 app.MapPricingEndpoints();
