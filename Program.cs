@@ -105,6 +105,13 @@ builder.Services.AddHttpClient<IPaystackPaymentService, PaystackPaymentService>(
 // Refund service - processes deposit refunds via Paystack
 builder.Services.AddHttpClient<IRefundService, RefundService>();
 
+// Insurance services - handles insurance policies and certificates for bookings
+builder.Services.AddScoped<GhanaHybridRentalApi.Services.Insurance.Providers.MockInsuranceProvider>();
+builder.Services.AddHttpClient<GhanaHybridRentalApi.Services.Insurance.Providers.CanadaInsuranceProvider>();
+builder.Services.AddScoped<GhanaHybridRentalApi.Services.Insurance.IInsuranceProviderFactory, GhanaHybridRentalApi.Services.Insurance.InsuranceProviderFactory>();
+builder.Services.AddScoped<GhanaHybridRentalApi.Services.Insurance.IInsuranceOrchestrator, GhanaHybridRentalApi.Services.Insurance.InsuranceOrchestrator>();
+builder.Services.AddScoped<GhanaHybridRentalApi.Services.Insurance.ICertificateGenerator, GhanaHybridRentalApi.Services.Insurance.CertificateGenerator>();
+
 // Turnstile verification service for bot protection
 builder.Services.AddHttpClient<ITurnstileService, TurnstileService>();
 

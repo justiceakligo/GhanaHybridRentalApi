@@ -477,6 +477,7 @@ public static class BookingEndpoints
         AppDbContext db,
         IAppConfigService configService,
         IPromoCodeService promoCodeService,
+        GhanaHybridRentalApi.Services.Insurance.IInsuranceOrchestrator insuranceOrchestrator,
         HttpContext context)
     {
         // Allow guest booking flow. If request contains "guestPhone" use guest flow, otherwise expect authenticated renter.
@@ -875,6 +876,16 @@ public static class BookingEndpoints
 
         db.Bookings.Add(booking);
         await db.SaveChangesAsync();
+
+        // Process insurance and generate certificate (non-blocking - errors logged but don't fail booking)
+        try
+        {
+            _ = Task.Run(async () => await insuranceOrchestrator.HandleBookingInsuranceAsync(booking.Id));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to initiate insurance processing for booking {booking.Id}: {ex.Message}");
+        }
 
         // Record promo code usage if applied
         if (promoCodeId.HasValue && !string.IsNullOrWhiteSpace(rPromoCode))

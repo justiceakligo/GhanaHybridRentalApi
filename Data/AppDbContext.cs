@@ -35,6 +35,8 @@ public class AppDbContext : DbContext
     public DbSet<Country> Countries => Set<Country>();
     public DbSet<City> Cities => Set<City>();
     public DbSet<Airport> Airports => Set<Airport>();
+    public DbSet<CountryInsuranceConfig> CountryInsuranceConfigs => Set<CountryInsuranceConfig>();
+    public DbSet<InsurancePolicy> InsurancePolicies => Set<InsurancePolicy>();
     public DbSet<ProfileChangeAudit> ProfileChangeAudits => Set<ProfileChangeAudit>();
     public DbSet<RentalAgreementTemplate> RentalAgreementTemplates => Set<RentalAgreementTemplate>();
     public DbSet<RentalAgreementAcceptance> RentalAgreementAcceptances => Set<RentalAgreementAcceptance>();
