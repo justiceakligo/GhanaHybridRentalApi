@@ -32,6 +32,7 @@ public class AppDbContext : DbContext
     public DbSet<RefundPolicy> RefundPolicies => Set<RefundPolicy>();
     public DbSet<Review> Reviews => Set<Review>();
     public DbSet<Report> Reports => Set<Report>();
+    public DbSet<Country> Countries => Set<Country>();
     public DbSet<City> Cities => Set<City>();
     public DbSet<Airport> Airports => Set<Airport>();
     public DbSet<ProfileChangeAudit> ProfileChangeAudits => Set<ProfileChangeAudit>();

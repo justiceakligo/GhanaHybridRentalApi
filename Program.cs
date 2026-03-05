@@ -8,6 +8,7 @@ using Microsoft.IdentityModel.Tokens;
 using GhanaHybridRentalApi.Data;
 using GhanaHybridRentalApi.Services;
 using GhanaHybridRentalApi.Endpoints;
+using GhanaHybridRentalApi.Middleware;
 using Microsoft.AspNetCore.Diagnostics; // added to support UseExceptionHandler mapping
 using Microsoft.AspNetCore.HttpOverrides; // Respect X-Forwarded-* headers (proxies)
 using QuestPDF.Infrastructure;
@@ -70,6 +71,10 @@ else
 
 builder.Services.AddScoped<IVehicleAvailabilityService, VehicleAvailabilityService>();
 builder.Services.AddHttpClient<IVehicleDataService, VehicleDataService>();
+
+// Country context service for multi-country support
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<ICountryContext, CountryContext>();
 
 // File upload service - use Azure Blob Storage for production
 var useCloudStorage = builder.Configuration.GetValue<bool>("AzureStorage:Enabled", true);
@@ -377,6 +382,10 @@ catch (Exception ex)
 // Middleware order is critical for CORS to work properly
 app.UseCors("AllowAll");
 app.UseRouting();
+
+// Country context middleware - extracts country code from route
+app.UseCountryContext();
+
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -384,6 +393,8 @@ app.UseAuthorization();
 app.UseStaticFiles();
 
 // Map endpoints
+app.MapCountryEndpoints();
+app.MapCityEndpoints();
 app.MapAuthEndpoints();
 app.MapUserEndpoints();
 app.MapOwnerEndpoints();

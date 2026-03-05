@@ -1,5 +1,6 @@
 using System.Text.Json;
 using GhanaHybridRentalApi.Data;
+using GhanaHybridRentalApi.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -16,7 +17,9 @@ public static class SettingsEndpoints
         app.MapPost("/api/v1/bookings/calculate-price", CalculateBookingPriceAsync);
     }
 
-    private static async Task<IResult> GetPublicSettingsAsync(AppDbContext db)
+    private static async Task<IResult> GetPublicSettingsAsync(
+        AppDbContext db, 
+        ICountryContext countryContext)
     {
         // Get platform fee percentage
         decimal platformFeePercentage = 15.0m; // Default
@@ -52,12 +55,19 @@ public static class SettingsEndpoints
             }
         }
 
+        // Use country context for currency and country-specific settings
         return Results.Ok(new
         {
             success = true,
             platformFeePercentage,
             defaultDepositPercentage,
-            currency = "GHS",
+            currency = countryContext.CurrencyCode,
+            currencySymbol = countryContext.CurrencySymbol,
+            country = countryContext.CountryCode,
+            countryName = countryContext.CountryName,
+            timezone = countryContext.Timezone,
+            phoneCode = countryContext.PhoneCode,
+            paymentProviders = countryContext.GetEnabledPaymentProviders(),
             taxRate = 0.0m, // VAT/tax if applicable
             minimumBookingDays = 1,
             cancellationPolicyUrl = "/api/v1/refund-policies",
@@ -68,7 +78,8 @@ public static class SettingsEndpoints
 
     private static async Task<IResult> CalculateBookingPriceAsync(
         [FromBody] PriceCalculationRequest request,
-        AppDbContext db)
+        AppDbContext db,
+        ICountryContext countryContext)
     {
         // Validate request
         if (request.VehicleId == Guid.Empty)
@@ -183,12 +194,13 @@ public static class SettingsEndpoints
                 depositDescription = "Refundable security deposit",
                 
                 grandTotal,
-                currency = "GHS"
+                currency = countryContext.CurrencyCode,
+                currencySymbol = countryContext.CurrencySymbol
             },
             breakdown = new[]
             {
-                new { label = "Vehicle Rental", amount = rentalAmount, description = $"{rentalDays} day(s) @ GHS {dailyRate}/day" },
-                request.WithDriver ? new { label = "Driver Service", amount = driverAmount, description = $"{rentalDays} day(s) @ GHS {driverAmount/rentalDays}/day" } : null,
+                new { label = "Vehicle Rental", amount = rentalAmount, description = $"{rentalDays} day(s) @ {countryContext.CurrencySymbol}{dailyRate}/day" },
+                request.WithDriver ? new { label = "Driver Service", amount = driverAmount, description = $"{rentalDays} day(s) @ {countryContext.CurrencySymbol}{driverAmount/rentalDays}/day" } : null,
                 new { label = $"Service Fee ({platformFeePercentage}%)", amount = platformFee, description = "Platform service charge" },
                 new { label = "Security Deposit", amount = depositAmount, description = "Refundable after rental" }
             }.Where(x => x != null).ToArray(),
@@ -196,7 +208,7 @@ public static class SettingsEndpoints
             {
                 includedKilometers = vehicle.IncludedKilometers,
                 pricePerExtraKm = vehicle.PricePerExtraKm,
-                description = $"{vehicle.IncludedKilometers} km included. Extra km charged at GHS {vehicle.PricePerExtraKm}/km"
+                description = $"{vehicle.IncludedKilometers} km included. Extra km charged at {countryContext.CurrencySymbol}{vehicle.PricePerExtraKm}/km"
             } : null,
             notes = new[]
             {

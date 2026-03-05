@@ -13,7 +13,10 @@ public class City
     public string? Region { get; set; } // e.g., "Greater Accra", "Ashanti"
 
     [MaxLength(8)]
-    public string? CountryCode { get; set; } = "GH"; // Ghana
+    public string? CountryCode { get; set; } = "GH"; // Legacy - for backward compatibility
+
+    // Foreign key to Country table
+    public Guid? CountryId { get; set; }
 
     public bool IsActive { get; set; } = true;
 
@@ -28,5 +31,6 @@ public class City
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation
+    public Country? Country { get; set; }
     public ICollection<Vehicle>? Vehicles { get; set; }
 }

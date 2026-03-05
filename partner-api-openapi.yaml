@@ -4,6 +4,18 @@ info:
   description: |
     Partner API for integrating RyveRental vehicle rental services into third-party platforms.
     
+    ## Multi-Country Support
+    RyveRental operates in multiple countries. You can access country-specific inventory using either:
+    - **Default routes** (Ghana): `/api/v1/partner/...` - Returns Ghana vehicles (backward compatible)
+    - **Country-specific routes**: `/api/v1/{country}/partner/...` - Returns vehicles for the specified country
+    
+    **Available Country Codes:**
+    - `gh` - Ghana (default)
+    - `ng` - Nigeria
+    - `ke` - Kenya
+    - `za` - South Africa
+    - `tz` - Tanzania
+    
     ## Getting Started
     1. Apply for partnership at https://dashboard.ryverental.com/partners
     2. Receive API key after approval
@@ -22,7 +34,7 @@ info:
     - Email: partners@ryverental.com
     - Phone: +233 XX XXX XXXX
     - Documentation: https://docs.ryverental.com/partners
-  version: 1.0.0
+  version: 2.0.0
   contact:
     name: RyveRental Partner Support
     email: partners@ryverental.com
@@ -51,6 +63,27 @@ tags:
     description: Create and manage bookings
   - name: Webhooks
     description: Event notifications
+  - name: Multi-Country
+    description: Country-specific API endpoints
+
+parameters:
+  CountryCodeParam:
+    name: country
+    in: path
+    required: true
+    description: |
+      Two-letter country code (ISO 3166-1 alpha-2, lowercase).
+      
+      **Available countries:**
+      - `gh` - Ghana
+      - `ng` - Nigeria  
+      - `ke` - Kenya
+      - `za` - South Africa
+      - `tz` - Tanzania
+    schema:
+      type: string
+      enum: [gh, ng, ke, za, tz]
+      example: ng
 
 paths:
   /api/v1/partner/vehicles:
@@ -443,6 +476,159 @@ paths:
                     type: string
                     example: "Webhook received"
 
+  # Multi-Country Partner API Endpoints
+  /api/v1/{country}/partner/vehicles:
+    get:
+      tags:
+        - Multi-Country
+        - Vehicles
+      summary: Get available vehicles (country-specific)
+      description: |
+        Retrieve vehicles available in a specific country. Identical to the default 
+        vehicles endpoint but filters by country code.
+        
+        **Country Codes:** gh, ng, ke, za, tz
+        
+        **Example:** `/api/v1/ng/partner/vehicles` returns vehicles in Nigeria
+      operationId: getAvailableVehiclesByCountry
+      parameters:
+        - $ref: '#/parameters/CountryCodeParam'
+        - name: startDate
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          example: "2026-01-20T10:00:00Z"
+        - name: endDate
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          example: "2026-01-25T10:00:00Z"
+        - name: categoryId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        - name: cityId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          example: "987fcdeb-51a2-43d1-b567-890123456789"
+      responses:
+        '200':
+          description: List of available vehicles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Vehicle'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /api/v1/{country}/partner/protection-plans:
+    get:
+      tags:
+        - Multi-Country
+        - Protection Plans
+      summary: Get protection plans (country-specific)
+      description: |
+        Retrieve protection plans with country-specific currency.
+        
+        **Example:** `/api/v1/ng/partner/protection-plans` returns plans in NGN (Nigerian Naira)
+      operationId: getProtectionPlansByCountry
+      parameters:
+        - $ref: '#/parameters/CountryCodeParam'
+      responses:
+        '200':
+          description: List of protection plans
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProtectionPlan'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /api/v1/{country}/partner/validate-promo:
+    post:
+      tags:
+        - Multi-Country
+        - Promo Codes
+      summary: Validate promo code (country-specific)
+      description: |
+        Validate a promo code for a specific country.
+        
+        **Example:** `/api/v1/ng/partner/validate-promo` validates promo for Nigeria
+      operationId: validatePromoCodeByCountry
+      parameters:
+        - $ref: '#/parameters/CountryCodeParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PromoValidationRequest'
+      responses:
+        '200':
+          description: Promo code validation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PromoValidationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /api/v1/{country}/partner/bookings:
+    post:
+      tags:
+        - Multi-Country
+        - Bookings
+      summary: Create booking (country-specific)
+      description: |
+        Create a booking in a specific country. Identical to the default bookings 
+        endpoint but creates booking for the specified country.
+        
+        **Example:** `/api/v1/ng/partner/bookings` creates booking in Nigeria
+      operationId: createBookingByCountry
+      parameters:
+        - $ref: '#/parameters/CountryCodeParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookingRequest'
+      responses:
+        '201':
+          description: Booking created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingResponse'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -498,6 +684,10 @@ components:
           format: uuid
           description: City where vehicle is located
           example: "123e4567-e89b-12d3-a456-426614174000"
+        countryCode:
+          type: string
+          description: Country code where vehicle is located (ISO 3166-1 alpha-2, lowercase)
+          example: "gh"
         category:
           type: object
           properties:
@@ -566,6 +756,11 @@ components:
           example: 200.00
         currency:
           type: string
+          description: Currency code (ISO 4217)
+          example: "GHS"
+        currencySymbol:
+          type: string
+          description: Currency symbol for display
           example: "GHS"
         includesMinorDamageWaiver:
           type: boolean

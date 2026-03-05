@@ -4,18 +4,21 @@
 
 RyveRental provides a comprehensive Partner API that allows third-party platforms (hotels, travel agencies, booking sites, OTAs) to integrate vehicle rental services directly into their applications. Partners can display available vehicles, accept bookings, and earn commission on each transaction.
 
+**Multi-Country Support:** RyveRental operates in multiple countries. The Partner API supports both default (Ghana) and country-specific endpoints to access inventory from different regions.
+
 ---
 
 ## Table of Contents
 
 1. [Getting Started](#getting-started)
-2. [Authentication](#authentication)
-3. [Integration Flow](#integration-flow)
-4. [API Endpoints](#api-endpoints)
-5. [Webhooks](#webhooks)
-6. [Settlement & Payments](#settlement--payments)
-7. [Testing & Go-Live](#testing--go-live)
-8. [Support](#support)
+2. [Multi-Country Support](#multi-country-support)
+3. [Authentication](#authentication)
+4. [Integration Flow](#integration-flow)
+5. [API Endpoints](#api-endpoints)
+6. [Webhooks](#webhooks)
+7. [Settlement & Payments](#settlement--payments)
+8. [Testing & Go-Live](#testing--go-live)
+9. [Support](#support)
 
 ---
 
@@ -73,6 +76,70 @@ Submit a partnership application through our partner portal or contact our partn
 
 ---
 
+## Multi-Country Support
+
+RyveRental operates in multiple countries across Africa. The Partner API supports both **default routes** (Ghana, backward compatible) and **country-specific routes** to access inventory from different regions.
+
+### Available Countries
+
+| Country Code | Country | Currency | Currency Symbol |
+|-------------|---------|----------|-----------------|
+| `gh` | Ghana | GHS | GHS |
+| `ng` | Nigeria | NGN | ₦ |
+| `ke` | Kenya | KES | KSh |
+| `za` | South Africa | ZAR | R |
+| `tz` | Tanzania | TZS | TSh |
+
+### Route Patterns
+
+#### Default Route (Ghana)
+Backward compatible - defaults to Ghana if no country code specified:
+```
+GET /api/v1/partner/vehicles
+```
+
+#### Country-Specific Route
+Include country code in the URL path:
+```
+GET /api/v1/{country}/partner/vehicles
+```
+
+### Examples
+
+**Ghana (default):**
+```bash
+curl -X GET "https://ryverental.info/api/v1/partner/vehicles" \
+  -H "X-API-Key: your_api_key_here"
+```
+
+**Nigeria:**
+```bash
+curl -X GET "https://ryverental.info/api/v1/ng/partner/vehicles" \
+  -H "X-API-Key: your_api_key_here"
+```
+
+**Kenya:**
+```bash
+curl -X GET "https://ryverental.info/api/v1/ke/partner/vehicles" \
+  -H "X-API-Key: your_api_key_here"
+```
+
+### Currency Handling
+
+- All pricing is returned in the country's local currency
+- Protection plans include `currency` and `currencySymbol` fields
+- Vehicles include `countryCode` field indicating their location
+- Your settlement invoice will be in the currency of the country where bookings occurred
+
+### Best Practices
+
+1. **Display currency clearly** - Show the correct currency symbol for each country
+2. **Filter by country** - If targeting multiple countries, let users select their location
+3. **Handle exchange rates** - If you display prices in a different currency, handle conversions on your end
+4. **Test per country** - Verify your integration works correctly for each country you support
+
+---
+
 ## Authentication
 
 All Partner API requests require authentication using an API Key sent in the request header.
@@ -113,6 +180,7 @@ curl -X GET "https://ryverental.info/api/v1/partner/vehicles" \
 ┌─────────────────────────────────────────────────────────────────┐
 │ Step 1: Fetch Available Vehicles                                │
 │ GET /api/v1/partner/vehicles?startDate=...&endDate=...          │
+│ OR /api/v1/{country}/partner/vehicles (e.g., /api/v1/ng/...)   │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -207,13 +275,24 @@ curl -X GET "https://ryverental.info/api/v1/partner/vehicles" \
 **Production:** `https://ryverental.info`  
 **Sandbox:** Contact partner support for sandbox access
 
+### Endpoint Patterns
+
+All Partner API endpoints are available in two formats:
+
+1. **Default (Ghana):** `/api/v1/partner/{endpoint}`
+2. **Country-Specific:** `/api/v1/{country}/partner/{endpoint}`
+
+Replace `{country}` with: `gh`, `ng`, `ke`, `za`, or `tz`
+
 ---
 
 ### 1. Get Available Vehicles
 
 Fetch a list of vehicles available for the specified dates.
 
-**Endpoint:** `GET /api/v1/partner/vehicles`
+**Endpoints:** 
+- `GET /api/v1/partner/vehicles` (Ghana, default)
+- `GET /api/v1/{country}/partner/vehicles` (Country-specific)
 
 **Headers:**
 ```
@@ -230,8 +309,16 @@ X-API-Key: your_api_key_here
 | `cityId` | GUID | No | Filter by city |
 
 **Example Request:**
+
+Ghana (default):
 ```bash
 curl -X GET "https://ryverental.info/api/v1/partner/vehicles?startDate=2026-01-20T10:00:00Z&endDate=2026-01-25T10:00:00Z&cityId=123e4567-e89b-12d3-a456-426614174000" \
+  -H "X-API-Key: your_api_key_here"
+```
+
+Nigeria:
+```bash
+curl -X GET "https://ryverental.info/api/v1/ng/partner/vehicles?startDate=2026-01-20T10:00:00Z&endDate=2026-01-25T10:00:00Z" \
   -H "X-API-Key: your_api_key_here"
 ```
 
@@ -248,6 +335,7 @@ curl -X GET "https://ryverental.info/api/v1/partner/vehicles?startDate=2026-01-2
     "seatingCapacity": 5,
     "hasAC": true,
     "cityId": "123e4567-e89b-12d3-a456-426614174000",
+    "countryCode": "gh",
     "category": {
       "name": "Economy",
       "defaultDailyRate": 150.00,
@@ -267,7 +355,9 @@ curl -X GET "https://ryverental.info/api/v1/partner/vehicles?startDate=2026-01-2
 
 Fetch available protection plans (mandatory for all bookings).
 
-**Endpoint:** `GET /api/v1/partner/protection-plans`
+**Endpoints:**
+- `GET /api/v1/partner/protection-plans` (Ghana, default)
+- `GET /api/v1/{country}/partner/protection-plans` (Country-specific)
 
 **Headers:**
 ```
@@ -275,8 +365,16 @@ X-API-Key: your_api_key_here
 ```
 
 **Example Request:**
+
+Ghana (default):
 ```bash
 curl -X GET "https://ryverental.info/api/v1/partner/protection-plans" \
+  -H "X-API-Key: your_api_key_here"
+```
+
+Kenya (currency in KES):
+```bash
+curl -X GET "https://ryverental.info/api/v1/ke/partner/protection-plans" \
   -H "X-API-Key: your_api_key_here"
 ```
 
@@ -328,7 +426,9 @@ curl -X GET "https://ryverental.info/api/v1/partner/protection-plans" \
 
 Validate a promo code before booking to show discount to customer.
 
-**Endpoint:** `POST /api/v1/partner/validate-promo`
+**Endpoints:**
+- `POST /api/v1/partner/validate-promo` (Ghana, default)
+- `POST /api/v1/{country}/partner/validate-promo` (Country-specific)
 
 **Headers:**
 ```
@@ -387,7 +487,9 @@ curl -X POST "https://ryverental.info/api/v1/partner/validate-promo" \
 
 Create a new booking after customer payment.
 
-**Endpoint:** `POST /api/v1/partner/bookings`
+**Endpoints:**
+- `POST /api/v1/partner/bookings` (Ghana, default)
+- `POST /api/v1/{country}/partner/bookings` (Country-specific)
 
 **Headers:**
 ```
@@ -411,6 +513,8 @@ Content-Type: application/json
 | `promoCode` | String | No | Promo code for discount |
 
 **Example Request:**
+
+Ghana (default):
 ```bash
 curl -X POST "https://ryverental.info/api/v1/partner/bookings" \
   -H "X-API-Key: your_api_key_here" \
@@ -426,6 +530,23 @@ curl -X POST "https://ryverental.info/api/v1/partner/bookings" \
     "paymentMethod": "card",
     "protectionPlanId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
     "promoCode": "SUMMER2026"
+  }'
+```
+
+Nigeria:
+```bash
+curl -X POST "https://ryverental.info/api/v1/ng/partner/bookings" \
+  -H "X-API-Key: your_api_key_here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "vehicleId": "abc123...",
+    "pickupDateTime": "2026-01-20T10:00:00Z",
+    "returnDateTime": "2026-01-25T10:00:00Z",
+    "withDriver": false,
+    "renterEmail": "customer@example.com",
+    "renterPhone": "+234 XXX XXXX XXX",
+    "renterName": "John Smith",
+    "paymentMethod": "card"
   }'
 ```
 

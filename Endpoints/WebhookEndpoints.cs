@@ -21,6 +21,7 @@ public static class WebhookEndpoints
         app.MapPost("/api/v1/webhooks/booking-cancelled", BookingCancelledWebhookAsync);
 
         // Partner API endpoints (authenticated via API key)
+        // Default routes (Ghana) - backward compatible
         app.MapPost("/api/v1/partner/bookings", CreatePartnerBookingAsync);
 
         app.MapGet("/api/v1/partner/vehicles", GetAvailableVehiclesForPartnerAsync);
@@ -28,6 +29,15 @@ public static class WebhookEndpoints
         app.MapGet("/api/v1/partner/protection-plans", GetProtectionPlansForPartnerAsync);
 
         app.MapPost("/api/v1/partner/validate-promo", ValidatePromoCodeForPartnerAsync);
+
+        // Multi-country Partner API endpoints (with country code in route)
+        app.MapPost("/api/v1/{country}/partner/bookings", CreatePartnerBookingAsync);
+
+        app.MapGet("/api/v1/{country}/partner/vehicles", GetAvailableVehiclesForPartnerAsync);
+
+        app.MapGet("/api/v1/{country}/partner/protection-plans", GetProtectionPlansForPartnerAsync);
+
+        app.MapPost("/api/v1/{country}/partner/validate-promo", ValidatePromoCodeForPartnerAsync);
 
         // Payment provider webhook endpoints
         app.MapPost("/api/v1/webhooks/stripe", StripeWebhookAsync);
@@ -400,13 +410,19 @@ public static class WebhookEndpoints
 
     private static async Task<IResult> GetProtectionPlansForPartnerAsync(
         AppDbContext db,
-        HttpContext context)
+        HttpContext context,
+        ICountryContext countryContext)
     {
         var apiKey = context.Request.Headers["X-API-Key"].FirstOrDefault();
         var (isValid, partner, errorMessage) = await PartnerAuthHelper.ValidatePartnerApiKeyAsync(apiKey, db);
         
         if (!isValid || partner is null)
             return Results.Json(new { error = errorMessage ?? "Unauthorized" }, statusCode: 401);
+
+        // Get country information for currency
+        var country = await countryContext.GetCountryAsync();
+        var currencyCode = country?.CurrencyCode ?? "GHS";
+        var currencySymbol = country?.CurrencySymbol ?? "GHS";
 
         var protectionPlans = await db.ProtectionPlans
             .Where(p => p.IsActive)
@@ -424,7 +440,8 @@ public static class WebhookEndpoints
             p.FixedPrice,
             p.MinFee,
             p.MaxFee,
-            p.Currency,
+            Currency = currencyCode, // Country-specific currency
+            CurrencySymbol = currencySymbol,
             p.IncludesMinorDamageWaiver,
             p.MinorWaiverCap,
             p.Deductible,
@@ -507,6 +524,7 @@ public static class WebhookEndpoints
     private static async Task<IResult> GetAvailableVehiclesForPartnerAsync(
         AppDbContext db,
         HttpContext context,
+        ICountryContext countryContext,
         [FromQuery] DateTime? startDate,
         [FromQuery] DateTime? endDate,
         [FromQuery] Guid? categoryId,
@@ -518,10 +536,18 @@ public static class WebhookEndpoints
         if (!isValid || partner is null)
             return Results.Json(new { error = errorMessage ?? "Unauthorized" }, statusCode: 401);
 
+        // Get country information for filtering
+        var country = await countryContext.GetCountryAsync();
+
         var query = db.Vehicles
             .Include(v => v.Category)
             .Include(v => v.City)
+            .ThenInclude(c => c!.Country)
             .Where(v => v.Status == "active");
+
+        // Filter by country
+        if (country != null)
+            query = query.Where(v => v.City!.CountryId == country.Id);
 
         if (categoryId.HasValue)
             query = query.Where(v => v.CategoryId == categoryId.Value);
@@ -556,6 +582,7 @@ public static class WebhookEndpoints
             v.SeatingCapacity,
             v.HasAC,
             v.CityId,
+            countryCode = v.City?.Country?.Code,
             category = v.Category is null ? null : new
             {
                 v.Category.Name,
